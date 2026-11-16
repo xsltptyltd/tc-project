@@ -17,3 +17,7 @@ mobile-app/android/
 
 # snapshots made by copy.sh
 deepcopy-*/
+
+# local tooling, not part of the project
+copy.sh
+copysync.sh

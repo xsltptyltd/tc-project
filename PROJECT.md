@@ -58,15 +58,15 @@ Node 22 or later. From the repository root:
 ```
 npm install
 npm test             # all tests, no AWS needed
-npm run typecheck
+npm run typecheck    # the phone app has its own: npm --prefix mobile-app run typecheck
 npm run dev:server   # local websocket server
 npm run cli -- ...   # command-line client, see cli/README.md
-npm run app          # the phone app, see mobile-app/README.md
+npm run app          # the phone app; needs its own install first, see mobile-app/README.md
 ```
 
 ## Conventions
 
-- TypeScript, strict. Node 22+. One npm workspace; packages are consumed as source, no build step.
+- TypeScript, strict. Node 22+. One npm workspace for everything except `mobile-app`, which has its own install; packages are consumed as source, no build step.
 - Tests are vitest, in each package's `test/` folder.
 - Everything that can be tested without AWS is tested without AWS: handlers take their
   storage and transport as dependencies so tests run against in-memory versions.

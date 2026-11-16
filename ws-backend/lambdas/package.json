@@ -4,9 +4,11 @@
   "private": true,
   "license": "MIT",
   "dependencies": {
-    "tc-protocol": "*"
+    "tc-protocol": "*",
+    "@aws-sdk/client-dynamodb": "^3.1150.0",
+    "@aws-sdk/lib-dynamodb": "^3.1150.0"
   },
   "devDependencies": {
-    "ws": "^8.23.0"
+    "ws": "^8.22.0"
   }
 }

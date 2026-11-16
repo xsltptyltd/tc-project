@@ -153,7 +153,7 @@ Three layers, from least to most personal:
    Since nothing is kept after a contact is broken (D5), adding the same person again
    computes the label afresh — which gives the same label back unless it was taken
    meanwhile.
-3. **Nickname.** A can replace the label with any name on their own phone ("Pierre"), and
+3. **Nickname.** A can replace the label with any name on their own phone ("Sam"), and
    change it again at any time. It
    is stored only on that phone and never sent, so it is lost if the phone is.
 

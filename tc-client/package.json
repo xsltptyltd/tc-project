@@ -6,5 +6,11 @@
   "description": "One device's connection to the tap-chat backend, shared by the CLI and the app",
   "main": "src/index.ts",
   "types": "src/index.ts",
-  "dependencies": { "tc-crypto": "*", "tc-protocol": "*" }
+  "dependencies": {
+    "tc-crypto": "*",
+    "tc-protocol": "*"
+  },
+  "devDependencies": {
+    "ws": "^8.22.0"
+  }
 }

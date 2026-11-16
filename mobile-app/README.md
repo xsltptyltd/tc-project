@@ -22,7 +22,15 @@ The encryption and connection code are the shared `tc-crypto` and `tc-client` pa
 You need the Android SDK with an emulator, or a phone with USB debugging. The app runs
 inside Expo Go, which is installed on the device automatically the first time.
 
-From the repository root, in two terminals:
+The app has its own install, separate from the rest of the repository. From the
+repository root, once:
+
+```
+npm install                        # the shared code
+npm --prefix mobile-app install    # the app
+```
+
+Then, in two terminals:
 
 ```
 npm run dev:server                 # the backend, on this computer
