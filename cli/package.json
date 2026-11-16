@@ -1,0 +1,12 @@
+{
+  "name": "tc-cli",
+  "version": "0.0.1",
+  "private": true,
+  "license": "MIT",
+  "description": "Command-line tap-chat client for local development",
+  "dependencies": {
+    "tc-client": "*",
+    "tc-crypto": "*",
+    "tc-protocol": "*"
+  }
+}

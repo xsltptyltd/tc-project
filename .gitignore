@@ -1,0 +1,19 @@
+**/node_modules/
+**/dist/
+**/build/
+**/.aws-sam/
+**/.terraform/
+**/*.tfstate*
+**/.env
+**/.env.*
+!**/.env.example
+**/.DS_Store
+**/.expo/
+mobile-app/ios/
+mobile-app/android/
+**/*.log
+**/coverage/
+.tc/
+
+# snapshots made by copy.sh
+deepcopy-*/

@@ -1,0 +1,121 @@
+// One device's connection to the backend: connect, send, receive.
+// Uses the standard WebSocket interface, which exists in Node 22+, in browsers and in
+// React Native, so the command-line client and the phone app share this code.
+import { createAuthToken, decryptFrom, encryptFor, type Identity } from 'tc-crypto';
+import type { ClientAction, DeviceId, ErrorCode, ServerEvent } from 'tc-protocol';
+
+export interface IncomingMessage {
+  id: string;
+  from: DeviceId;
+  text: string;
+}
+
+/** Confirms the backend accepted a message. It says nothing about the receiver. */
+export interface SendReceipt {
+  messageId: string;
+}
+
+export class ServerError extends Error {
+  constructor(readonly code: ErrorCode) {
+    super(`server error: ${code}`);
+  }
+}
+
+/** Call `init()` from tc-crypto before using this. */
+export class TcClient {
+  private socket?: WebSocket;
+  // The backend answers frames in order, so replies are matched first in, first out.
+  private pending: Array<{ resolve(r: SendReceipt): void; reject(e: Error): void }> = [];
+  private messageListeners: Array<(message: IncomingMessage) => void> = [];
+  private closeListeners: Array<() => void> = [];
+
+  constructor(
+    private readonly identity: Identity,
+    private readonly url: string,
+  ) { }
+
+  get connected(): boolean {
+    return this.socket?.readyState === 1; // WebSocket.OPEN
+  }
+
+  /** Rejects if the server is unreachable or refuses the connection. */
+  connect(): Promise<void> {
+    const token = createAuthToken(this.identity, Math.floor(Date.now() / 1000));
+    const socket = new WebSocket(`${this.url.replace(/\/+$/, '')}/?auth=${token}`);
+    this.socket = socket;
+    return new Promise((resolve, reject) => {
+      let opened = false;
+      socket.onopen = () => {
+        opened = true;
+        resolve();
+      };
+      socket.onmessage = (event) => {
+        if (typeof event.data === 'string') this.handle(JSON.parse(event.data) as ServerEvent);
+      };
+      socket.onerror = () => {
+        if (!opened) reject(new Error('could not connect'));
+      };
+      socket.onclose = () => {
+        if (!opened) reject(new Error('could not connect'));
+        for (const waiting of this.pending.splice(0)) waiting.reject(new Error('connection closed'));
+        if (opened) for (const listener of this.closeListeners) listener();
+      };
+    });
+  }
+
+  onMessage(listener: (message: IncomingMessage) => void): void {
+    this.messageListeners.push(listener);
+  }
+
+  /** Called when an established connection ends, whoever ended it. */
+  onClose(listener: () => void): void {
+    this.closeListeners.push(listener);
+  }
+
+  send(to: DeviceId, text: string): Promise<SendReceipt> {
+    const action: ClientAction = {
+      action: 'send',
+      to,
+      ciphertext: encryptFor(this.identity, to, { v: 1, text }),
+    };
+    return new Promise((resolve, reject) => {
+      if (!this.socket || !this.connected) {
+        reject(new Error('not connected'));
+        return;
+      }
+      this.pending.push({ resolve, reject });
+      this.socket.send(JSON.stringify(action));
+    });
+  }
+
+  close(): Promise<void> {
+    const socket = this.socket;
+    if (!socket || socket.readyState === 3) return Promise.resolve(); // WebSocket.CLOSED
+    return new Promise((resolve) => {
+      this.closeListeners.push(resolve);
+      socket.close();
+    });
+  }
+
+  private handle(event: ServerEvent): void {
+    switch (event.type) {
+      case 'message': {
+        const { id, from, ciphertext } = event.envelope;
+        let text: string;
+        try {
+          text = decryptFrom(this.identity, from, ciphertext).text;
+        } catch {
+          return; // not for us, or not from who it claims: drop it
+        }
+        for (const listener of this.messageListeners) listener({ id, from, text });
+        return;
+      }
+      case 'sent':
+        this.pending.shift()?.resolve({ messageId: event.messageId });
+        return;
+      case 'error':
+        this.pending.shift()?.reject(new ServerError(event.code));
+        return;
+    }
+  }
+}

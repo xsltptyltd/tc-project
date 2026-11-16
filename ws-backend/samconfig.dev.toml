@@ -1,0 +1,16 @@
+version=0.1
+[default.global.parameters]
+region = "us-west-2"
+stack_name = "tc-dev-ws"
+s3_bucket = "tc-sam-us-west-2"
+s3_prefix = "tc-dev-ws"
+parameter_overrides = """\
+    Project=\"tc\" \
+    Stage=\"dev\" \
+    DbVersion=\"v1\" \
+"""
+
+[default.deploy.parameters]
+confirm_changeset = false
+capabilities = "CAPABILITY_IAM"
+tags = "project=\"tc\" repository=\"ws-backend\" stage=\"dev\""

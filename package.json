@@ -1,0 +1,32 @@
+{
+  "name": "tap-chat",
+  "private": true,
+  "license": "MIT",
+  "workspaces": [
+    "tc-protocol",
+    "tc-crypto",
+    "tc-client",
+    "ws-backend/lambdas",
+    "cli",
+    "mobile-app"
+  ],
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit -p tsconfig.json && npm run typecheck -w mobile-app",
+    "dev:server": "tsx ws-backend/lambdas/local/main.ts",
+    "cli": "tsx cli/src/main.ts",
+    "app": "npm run start -w mobile-app"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "devDependencies": {
+    "@types/aws-lambda": "^8.10.164",
+    "@types/libsodium-wrappers": "^0.7.14",
+    "@types/node": "^26.6.6",
+    "@types/ws": "^8.18.2",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.12"
+  }
+}

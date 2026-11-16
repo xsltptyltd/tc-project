@@ -1,0 +1,12 @@
+{
+  "name": "tc-ws-backend",
+  "version": "0.0.1",
+  "private": true,
+  "license": "MIT",
+  "dependencies": {
+    "tc-protocol": "*"
+  },
+  "devDependencies": {
+    "ws": "^8.23.0"
+  }
+}

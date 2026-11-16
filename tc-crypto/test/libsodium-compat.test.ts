@@ -1,0 +1,75 @@
+// Proves the wire formats are libsodium's, so a libsodium-based client could talk to
+// this one. libsodium is a dev dependency only; nothing at runtime uses it.
+import sodium from 'libsodium-wrappers';
+import { beforeAll, describe, expect, it } from 'vitest';
+import { authSigningString, parseAuthToken } from 'tc-protocol';
+import { createAuthToken, decryptFrom, encryptFor, generateIdentity, init, type Identity } from '../src';
+
+const variant = () => sodium.base64_variants.URLSAFE_NO_PADDING;
+const b64 = (text: string) => sodium.from_base64(text, variant());
+
+/** The libsodium view of one of our identities. */
+function sodiumKeys(identity: Identity) {
+  const pair = sodium.crypto_sign_seed_keypair(b64(identity.secretKey));
+  return {
+    signPublic: pair.publicKey,
+    boxPublic: sodium.crypto_sign_ed25519_pk_to_curve25519(pair.publicKey),
+    boxSecret: sodium.crypto_sign_ed25519_sk_to_curve25519(pair.privateKey),
+  };
+}
+
+beforeAll(async () => {
+  await init();
+  await sodium.ready;
+});
+
+describe('compatibility with libsodium', () => {
+  it('derives the same device id from a seed', () => {
+    const me = generateIdentity();
+    expect(sodium.to_base64(sodiumKeys(me).signPublic, variant())).toBe(me.deviceId);
+  });
+
+  it('produces signatures libsodium accepts', () => {
+    const me = generateIdentity();
+    const token = parseAuthToken(createAuthToken(me, 1_800_000_000))!;
+    const ok = sodium.crypto_sign_verify_detached(
+      b64(token.sig),
+      authSigningString(me.deviceId, 1_800_000_000),
+      sodiumKeys(me).signPublic,
+    );
+    expect(ok).toBe(true);
+  });
+
+  it('produces ciphertext libsodium can open', () => {
+    const alice = generateIdentity();
+    const bob = generateIdentity();
+    const bytes = b64(encryptFor(alice, bob.deviceId, { v: 1, text: 'héllo 👋' }));
+    const n = sodium.crypto_box_NONCEBYTES;
+    const plain = sodium.crypto_box_open_easy(
+      bytes.slice(n),
+      bytes.slice(0, n),
+      sodiumKeys(alice).boxPublic,
+      sodiumKeys(bob).boxSecret,
+    );
+    expect(JSON.parse(sodium.to_string(plain))).toEqual({ v: 1, text: 'héllo 👋' });
+  });
+
+  it('opens ciphertext libsodium produced', () => {
+    const alice = generateIdentity();
+    const bob = generateIdentity();
+    const nonce = sodium.randombytes_buf(sodium.crypto_box_NONCEBYTES);
+    const box = sodium.crypto_box_easy(
+      JSON.stringify({ v: 1, text: 'from libsodium' }),
+      nonce,
+      sodiumKeys(bob).boxPublic,
+      sodiumKeys(alice).boxSecret,
+    );
+    const wire = new Uint8Array(nonce.length + box.length);
+    wire.set(nonce);
+    wire.set(box, nonce.length);
+    expect(decryptFrom(bob, alice.deviceId, sodium.to_base64(wire, variant()))).toEqual({
+      v: 1,
+      text: 'from libsodium',
+    });
+  });
+});

@@ -1,0 +1,25 @@
+{
+  "compilerOptions": {
+    "target": "es2022",
+    "module": "preserve",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "types": ["node"]
+  },
+  "include": [
+    "tc-protocol/src",
+    "tc-crypto/src",
+    "ws-backend/lambdas/src",
+    "ws-backend/lambdas/local",
+    "ws-backend/lambdas/test",
+    "tc-crypto/test",
+    "tc-protocol/test",
+    "tc-client/src",
+    "tc-client/test",
+    "cli/src"
+  ]
+}
