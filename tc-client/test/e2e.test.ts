@@ -3,7 +3,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import WebSocket, { WebSocketServer } from 'ws';
 import { encryptFor, generateIdentity, init } from 'tc-crypto';
 import { startLocalServer, type LocalServer } from '../../ws-backend/lambdas/local/server';
-import { TcClient, type IncomingMessage } from '../src';
+import { REMEMBERED_IDS, TcClient, type IncomingMessage } from '../src';
 
 let server: LocalServer;
 const clients: TcClient[] = [];
@@ -270,6 +270,55 @@ describe('client', () => {
         JSON.stringify({ action: 'ack', messageId: 'm1' }),
         JSON.stringify({ action: 'ack', messageId: 'm2' }),
       ]);
+      await client.close();
+    } finally {
+      await fake.close();
+    }
+  });
+
+  it('acknowledges again, without showing again, a message that comes back on a later connection', async () => {
+    // The first acknowledgement was lost with the connection, so the backend still has
+    // the message and sends it again. The app already showed it.
+    const fake = await fakeServer((frame, socket) => {
+      if (frame === JSON.stringify({ action: 'fetch' })) socket.send(JSON.stringify(envelope('m1')));
+    });
+    try {
+      const client = new TcClient(bob, fake.url);
+      const received: string[] = [];
+      client.onMessage((m) => received.push(m.id));
+      await client.connect();
+      await expect.poll(() => fake.frames.length).toBe(2);
+      await client.close();
+      await client.connect();
+      await expect.poll(() => fake.frames.length).toBe(4);
+
+      expect(received).toEqual(['m1']);
+      expect(fake.frames.filter((f) => f.includes('"ack"'))).toEqual([
+        JSON.stringify({ action: 'ack', messageId: 'm1' }),
+        JSON.stringify({ action: 'ack', messageId: 'm1' }),
+      ]);
+      await client.close();
+    } finally {
+      await fake.close();
+    }
+  });
+
+  it('remembers only the most recent ids, so a long-running app does not grow', async () => {
+    const total = REMEMBERED_IDS + 5;
+    const fake = await fakeServer((frame, socket) => {
+      if (frame !== JSON.stringify({ action: 'fetch' })) return;
+      for (let i = 0; i < total; i++) socket.send(JSON.stringify(envelope(`m${i}`, sealed)));
+      socket.send(JSON.stringify(envelope('m0', sealed))); // forgotten by now: shown again
+      socket.send(JSON.stringify(envelope(`m${total - 1}`, sealed))); // still remembered
+    });
+    const sealed = encryptFor(alice, bob.deviceId, { v: 1, text: 'x' });
+    try {
+      const client = new TcClient(bob, fake.url);
+      const received: string[] = [];
+      client.onMessage((m) => received.push(m.id));
+      await client.connect();
+      await expect.poll(() => received.length).toBe(total + 1);
+      expect(received.at(-1)).toBe('m0');
       await client.close();
     } finally {
       await fake.close();

@@ -1,6 +1,6 @@
 # Single table. Only the base keys and one generic GSI are declared; add GSIs when an
-# access pattern actually needs one. What sits where, and why GSI1 is enough for
-# connections and messages, is design/DECISIONS.md D16.
+# access pattern actually needs one. What sits where, and why connections and messages
+# need no index at all (GSI1 is declared and unused), is design/DECISIONS.md D16.
 resource "aws_dynamodb_table" "table" {
   name                        = "${var.project}-${var.stage}-${var.version-suffix}"
   billing_mode                = "PAY_PER_REQUEST"

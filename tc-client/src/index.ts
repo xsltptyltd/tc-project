@@ -21,6 +21,12 @@ export class ServerError extends Error {
   }
 }
 
+/**
+ * How many message ids a client remembers, to show each message once. Far more than can
+ * arrive twice in practice: a repeat comes within one connection or on the next.
+ */
+export const REMEMBERED_IDS = 1000;
+
 /** Call `init()` from tc-crypto before using this. */
 export class TcClient {
   private socket?: WebSocket;
@@ -29,8 +35,12 @@ export class TcClient {
   private messageListeners: Array<(message: IncomingMessage) => void> = [];
   private closeListeners: Array<() => void> = [];
   // A message sent while we are connecting can arrive twice: live, and in the answer
-  // to `fetch`. Listeners see each message once.
+  // to `fetch`. Listeners see each message once. Only the most recent ids are kept, so
+  // this does not grow for as long as the app runs.
   private delivered = new Set<string>();
+  // Ids acknowledged on the current connection. A message that comes again on a later
+  // connection was not deleted — the acknowledgement was lost — so it is acknowledged again.
+  private acknowledged = new Set<string>();
 
   constructor(
     private readonly identity: Identity,
@@ -46,6 +56,7 @@ export class TcClient {
     const token = createAuthToken(this.identity, Math.floor(Date.now() / 1000));
     const socket = new WebSocket(`${this.url.replace(/\/+$/, '')}/?auth=${token}`);
     this.socket = socket;
+    this.acknowledged.clear();
     return new Promise((resolve, reject) => {
       let opened = false;
       socket.onopen = () => {
@@ -113,11 +124,29 @@ export class TcClient {
     });
   }
 
+  /** Once per connection for each message; a repeat within one connection is not needed. */
+  private acknowledge(id: string): void {
+    if (!this.connected || this.acknowledged.has(id)) return;
+    this.acknowledged.add(id);
+    this.socket?.send(JSON.stringify({ action: 'ack', messageId: id } satisfies ClientAction));
+  }
+
+  private remember(id: string): void {
+    this.delivered.add(id);
+    if (this.delivered.size > REMEMBERED_IDS) {
+      // A Set keeps insertion order, so the first one is the oldest.
+      this.delivered.delete(this.delivered.values().next().value!);
+    }
+  }
+
   private handle(event: ServerEvent): void {
     switch (event.type) {
       case 'message': {
         const { id, from, ciphertext } = event.envelope;
-        if (this.delivered.has(id)) return;
+        if (this.delivered.has(id)) {
+          this.acknowledge(id); // shown already; make sure the backend lets go of it
+          return;
+        }
         let text: string;
         try {
           text = decryptFrom(this.identity, from, ciphertext).text;
@@ -125,13 +154,11 @@ export class TcClient {
           return; // not for us, or not from who it claims: drop it
         }
         if (this.messageListeners.length === 0) return; // nobody to give it to: keep it
-        this.delivered.add(id);
+        this.remember(id);
         for (const listener of this.messageListeners) listener({ id, from, text });
         // The app has it now, so the backend deletes it (D9): from here on it exists only
         // in this app's memory. If the connection is already gone, it comes again next time.
-        if (this.connected) {
-          this.socket?.send(JSON.stringify({ action: 'ack', messageId: id } satisfies ClientAction));
-        }
+        this.acknowledge(id);
         return;
       }
       case 'sent':

@@ -39,8 +39,11 @@ npm test
 Expired messages are never delivered and are deleted: by a sweeper every second on the
 local server, by the table's TTL on DynamoDB (`design/DECISIONS.md` D8).
 
-The SAM template has never been validated, built or deployed, and neither have the AWS
-adapters — no claim that they work until they have run there. The DynamoDB table itself
+The DynamoDB store and the Lambda handlers are tested without AWS, against an in-memory
+stand-in for the DynamoDB client (`test/fake-dynamodb.ts`); the store passes the same
+tests as the in-memory one (`test/store-contract.test.ts`). That is not AWS: the SAM
+template has never been validated, built or deployed, and neither have the AWS adapters
+— no claim that they work until they have run there. The DynamoDB table itself
 is Terraform, in `infra/dynamodb`, and must exist first. Deployment is by hand:
 
 ```

@@ -1,13 +1,14 @@
 // The Store on DynamoDB — the single table from infra/dynamodb. The layout, and why no
-// index beyond the generic GSI1 is needed, is design/DECISIONS.md D16:
+// index is needed, is design/DECISIONS.md D16:
 //
-//   connection   PK CONNECTION#<connectionId>   SK CONNECTION
-//                GSI1PK DEVICE#<deviceId>       GSI1SK CONNECTION#<connectionId>
-//   message      PK DEVICE#<to>                 SK MSG#<id>
-//                + `delivered: true` once handed to the receiver (D17)
+//   connection, by id       PK CONNECTION#<connectionId>   SK CONNECTION
+//   connection, by device   PK DEVICE#<deviceId>           SK CONNECTION#<connectionId>
+//   message                 PK DEVICE#<to>                 SK MSG#<id>
+//                           + `delivered: true` once handed to the receiver (D17)
 //
-// The item-shaping functions are pure and unit-tested. The class that sends them to
-// DynamoDB is not: it is never exercised without AWS.
+// Tested without AWS: the item shaping directly, and the whole class through an
+// in-memory stand-in for the DynamoDB client (test/fake-dynamodb.ts), with the same
+// tests as the in-memory store (test/store-contract.test.ts). Never run on AWS yet.
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import {
   DeleteCommand,
@@ -15,6 +16,7 @@ import {
   GetCommand,
   PutCommand,
   QueryCommand,
+  TransactWriteCommand,
   UpdateCommand,
   type QueryCommandInput,
 } from '@aws-sdk/lib-dynamodb';
@@ -35,15 +37,30 @@ export function connectionKey(connectionId: string) {
   return { PK: CONNECTION(connectionId), SK: 'CONNECTION' };
 }
 
+/** The same connection, filed under its device: "every connection this device has". */
+export function deviceConnectionKey(deviceId: DeviceId, connectionId: string) {
+  return { PK: DEVICE(deviceId), SK: CONNECTION(connectionId) };
+}
+
+const connectionFields = (connection: Connection) => ({
+  ...connection,
+  ttl: connection.connectedAt + CONNECTION_SWEEP_SECONDS,
+});
+
+/**
+ * A connection is stored twice, both on the base table, because both directions must be
+ * read with strong consistency: by connection id (the first frame can arrive right after
+ * $connect), and by device (a message sent right after the receiver connected must find
+ * that connection, or it would wait for the receiver's next fetch — D15, D16).
+ */
 export function connectionItem(connection: Connection) {
+  return { ...connectionKey(connection.connectionId), ...connectionFields(connection) };
+}
+
+export function deviceConnectionItem(connection: Connection) {
   return {
-    ...connectionKey(connection.connectionId),
-    // The other direction: "every connection this device has", answered by GSI1. The
-    // CONNECTION# prefix leaves the DEVICE# partition free for other item types later.
-    GSI1PK: DEVICE(connection.deviceId),
-    GSI1SK: CONNECTION(connection.connectionId),
-    ...connection,
-    ttl: connection.connectedAt + CONNECTION_SWEEP_SECONDS,
+    ...deviceConnectionKey(connection.deviceId, connection.connectionId),
+    ...connectionFields(connection),
   };
 }
 
@@ -82,22 +99,39 @@ export function envelopesOldestFirst(items: Record<string, unknown>[]): Envelope
   return items.map(envelopeFrom).sort((a, b) => a.sentAt - b.sentAt);
 }
 
-export class DynamoStore implements Store {
-  private readonly db: DynamoDBDocumentClient;
+/** The part of the DynamoDB document client the store uses; tests pass a stand-in. */
+export type DocumentClient = Pick<DynamoDBDocumentClient, 'send'>;
 
+export class DynamoStore implements Store {
   constructor(
     private readonly table: string,
-    client: DynamoDBClient = new DynamoDBClient({}),
-  ) {
-    this.db = DynamoDBDocumentClient.from(client);
-  }
+    private readonly db: DocumentClient = DynamoDBDocumentClient.from(new DynamoDBClient({})),
+  ) {}
 
   async putConnection(connection: Connection): Promise<void> {
-    await this.db.send(new PutCommand({ TableName: this.table, Item: connectionItem(connection) }));
+    // Both items or neither: half a connection would either never receive or never be removed.
+    await this.db.send(
+      new TransactWriteCommand({
+        TransactItems: [
+          { Put: { TableName: this.table, Item: connectionItem(connection) } },
+          { Put: { TableName: this.table, Item: deviceConnectionItem(connection) } },
+        ],
+      }),
+    );
   }
 
   async deleteConnection(connectionId: string): Promise<void> {
-    await this.db.send(new DeleteCommand({ TableName: this.table, Key: connectionKey(connectionId) }));
+    // A $disconnect event carries only the connection id; the device is read from it.
+    const connection = await this.getConnection(connectionId);
+    if (!connection) return;
+    await this.db.send(
+      new TransactWriteCommand({
+        TransactItems: [
+          { Delete: { TableName: this.table, Key: connectionKey(connectionId) } },
+          { Delete: { TableName: this.table, Key: deviceConnectionKey(connection.deviceId, connectionId) } },
+        ],
+      }),
+    );
   }
 
   async getConnection(connectionId: string): Promise<Connection | undefined> {
@@ -114,14 +148,15 @@ export class DynamoStore implements Store {
   }
 
   async listConnections(deviceId: DeviceId): Promise<Connection[]> {
-    // A GSI read is always eventually consistent; a connection opened a moment ago may
-    // be missed. Harmless here: the message is stored first, and that device's own
-    // fetch (a consistent read) brings it.
+    // Strongly consistent, and that matters: a message is stored before this is read, and
+    // a device fetches after its connection is written. So either this read sees the
+    // connection and the message is pushed, or the connection came later and its fetch
+    // sees the message. An index could not promise that (it is eventually consistent).
     const items = await this.queryAll({
       TableName: this.table,
-      IndexName: 'GSI1',
-      KeyConditionExpression: 'GSI1PK = :device AND begins_with(GSI1SK, :connection)',
+      KeyConditionExpression: 'PK = :device AND begins_with(SK, :connection)',
       ExpressionAttributeValues: { ':device': DEVICE(deviceId), ':connection': 'CONNECTION#' },
+      ConsistentRead: true,
     });
     return items.map(connectionFrom);
   }
@@ -211,7 +246,7 @@ export class DynamoStore implements Store {
     do {
       const page = await this.db.send(new QueryCommand({ ...input, ExclusiveStartKey: startKey }));
       items.push(...(page.Items ?? []));
-      startKey = page.LastEvaluatedKey;
+      startKey = page.LastEvaluatedKey as Record<string, unknown> | undefined;
     } while (startKey);
     return items;
   }

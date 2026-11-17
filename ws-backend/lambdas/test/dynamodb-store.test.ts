@@ -1,6 +1,6 @@
-// The DynamoDB adapter is not tested against AWS. What is tested is the pure part:
-// how connections and messages are shaped into items and keys, which is where a quiet
-// mistake (a wrong prefix, an unpadded number) would corrupt the table.
+// How connections and messages are shaped into items and keys, which is where a quiet
+// mistake (a wrong prefix, an unpadded number) would corrupt the table. What the store
+// then does with them is in store-contract.test.ts.
 import { describe, expect, it } from 'vitest';
 import { MESSAGE_TTL_SECONDS, type Envelope } from 'tc-protocol';
 import {
@@ -8,6 +8,8 @@ import {
   connectionFrom,
   connectionItem,
   connectionKey,
+  deviceConnectionItem,
+  deviceConnectionKey,
   envelopeFrom,
   envelopesOldestFirst,
   messageItem,
@@ -74,10 +76,12 @@ describe('connection items', () => {
     expect(item.PK).toBe('CONNECTION#conn-1');
   });
 
-  it('carry the device → connections direction on GSI1', () => {
-    const item = connectionItem(connection);
-    expect(item.GSI1PK).toBe(`DEVICE#${alice}`);
-    expect(item.GSI1SK).toBe('CONNECTION#conn-1');
+  it('are filed a second time under their device, on the base table', () => {
+    const item = deviceConnectionItem(connection);
+    expect(deviceConnectionKey(alice, 'conn-1')).toEqual({ PK: item.PK, SK: item.SK });
+    expect(item.PK).toBe(`DEVICE#${alice}`);
+    expect(item.SK).toBe('CONNECTION#conn-1');
+    expect(connectionFrom(item)).toEqual(connection);
   });
 
   it('round-trip', () => {

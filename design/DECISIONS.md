@@ -124,7 +124,7 @@ dev:server`) to watch it happen — never longer than 24 hours. Times are whole 
 a lifetime of N seconds ends between N−1 and N seconds after sending.
 
 If deletion within days is ever not enough on DynamoDB, the next step is a scheduled
-sweep; it needs an index by expiry time, which GSI1 can carry (D16). Not built.
+sweep; it needs an index by expiry time, which the unused GSI1 can carry (D16). Not built.
 
 Same principle for media on S3.
 
@@ -144,6 +144,8 @@ A message stays on the backend until the receiver acknowledges it, or 24 hours.
 - Delivery is at least once: a message the client never acknowledged (connection lost
   first, nobody listening yet, or undecryptable) is delivered again on the next `fetch`,
   until it expires. One that could not be decrypted is never acknowledged; it expires.
+- A client that is sent a message it has already shown does not show it again, and
+  acknowledges it again: the first acknowledgement was lost.
 
 ## D10 — Push notifications carry no content
 
@@ -229,37 +231,46 @@ per unexpired message addressed to it, oldest first.
 Everything lives in the single table from `infra/dynamodb` (PK, SK, one generic GSI, TTL
 on `ttl`). The layout follows the access patterns, not the other way round:
 
-| Item | PK | SK | GSI1PK | GSI1SK |
-|---|---|---|---|---|
-| connection | `CONNECTION#<connectionId>` | `CONNECTION` | `DEVICE#<deviceId>` | `CONNECTION#<connectionId>` |
-| message | `DEVICE#<to>` | `MSG#<id>` | — | — |
+| Item | PK | SK |
+|---|---|---|
+| connection, by id | `CONNECTION#<connectionId>` | `CONNECTION` |
+| connection, by device | `DEVICE#<deviceId>` | `CONNECTION#<connectionId>` |
+| message | `DEVICE#<to>` | `MSG#<id>` |
 
 A message item also holds the envelope's fields, `ttl`, and `delivered: true` once it has
 been handed to its receiver (D17).
 
-- **Connections are keyed by connection id** because that is all a `$disconnect` event
-  carries. The other direction — every connection a device has, needed to deliver live —
-  is the one and only use of GSI1, which was declared for exactly this.
-- **Messages sit on the base table, in the receiver's partition, not on an index.** A GSI
-  can only be read with eventual consistency; the base table can be read strongly, so a
-  `fetch` sent right after connecting sees a message written a moment earlier. The REST
-  read (D7), acknowledgement (D9) and contact-break deletions (D5) all start from a
-  receiver the backend already knows — so none of them needs another index.
+- **Every read is on the base table, strongly consistent. No index is used.** A GSI can
+  only be read with eventual consistency, and two reads cannot live with that (below).
+- **A connection is stored twice, written and removed in one transaction.** By connection
+  id, because that is all a `$disconnect` event carries and the first frame can arrive
+  right after `$connect`. By device, to deliver live.
+- **Why "by device" must be consistent.** A message is stored, then the receiver's
+  connections are read. A device writes its connection, then fetches. With consistent
+  reads one of the two always happens: the sender sees the connection and the message is
+  pushed, or the connection came later and its fetch sees the message. With an index, a
+  message sent a moment after the receiver's fetch could be missed by both, and wait
+  until the receiver's next connection.
+- **Messages sit in the receiver's partition.** A `fetch` sent right after connecting sees
+  a message written a moment earlier. The REST read (D7), acknowledgement (D9) and
+  contact-break deletions (D5) all start from a receiver the backend already knows.
 - **The sort key is the message id, not the time.** An acknowledgement carries only the
   id, and the receiver comes from the connection: together they are the exact key, so
   acknowledging is one delete with no read first. Oldest-first order is restored by
   sorting on `sentAt` after reading, which costs nothing because `fetch` reads the
-  receiver's whole partition anyway; the REST read (D7) will have to do the same.
-- **No new GSI**, for those reasons. One is added when an access pattern cannot be
+  receiver's messages anyway; the REST read (D7) will have to do the same.
+- **GSI1 stays declared and unused.** An index is used when an access pattern cannot be
   answered from a partition the backend already knows — not before.
 - The `ttl` attribute is `expiresAt` on messages (best effort; reads still filter, D8)
   and connect time + 3 hours on connections, which only matters if a `$disconnect` was
   lost: API Gateway closes every websocket within 2 hours anyway.
-- Key prefixes (`CONNECTION#`, `MSG#`) keep the `DEVICE#<id>` partitions free for later
-  item types, contacts first of all.
+- Key prefixes (`CONNECTION#`, `MSG#`) keep item types apart inside a `DEVICE#<id>`
+  partition, and leave room for later ones, contacts first of all.
 
-Implemented in `ws-backend/lambdas/src/adapters/dynamodb-store.ts`; the item shaping is
-pure and unit-tested, the calls to AWS are not (they never are).
+Implemented in `ws-backend/lambdas/src/adapters/dynamodb-store.ts`. Tested without AWS:
+every `Store` behaviour runs against both the in-memory store and this one talking to an
+in-memory stand-in for the DynamoDB client (`test/store-contract.test.ts`,
+`test/fake-dynamodb.ts`). The stand-in is not DynamoDB: nothing has run on AWS yet.
 
 ## D17 — A sender can take back a message until it is delivered
 
