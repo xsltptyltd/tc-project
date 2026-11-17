@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { WebSocketServer, type WebSocket } from 'ws';
-import type { ServerEvent } from 'tc-protocol';
+import { MESSAGE_TTL_SECONDS, type ServerEvent } from 'tc-protocol';
 import { MemoryStore } from '../src/adapters/memory-store';
 import { verifyAuthToken } from '../src/core/auth';
 import { onConnect, onDisconnect } from '../src/core/connections';
@@ -18,15 +18,28 @@ export interface LocalServer {
   close(): Promise<void>;
 }
 
-export async function startLocalServer(port = 0, host = '127.0.0.1'): Promise<LocalServer> {
-  const store = new MemoryStore();
-  const sockets = new Map<string, WebSocket>();
+export interface LocalServerOptions {
+  /** How long an unacknowledged message is kept. Default: 24 hours. */
+  messageTtlSeconds?: number;
+  /** How often expired messages are swept from memory. Default: every second. */
+  sweepIntervalMs?: number;
+}
+
+export async function startLocalServer(
+  port = 0,
+  host = '127.0.0.1',
+  { messageTtlSeconds = MESSAGE_TTL_SECONDS, sweepIntervalMs = 1000 }: LocalServerOptions = {},
+): Promise<LocalServer> {
   const now = () => Math.floor(Date.now() / 1000);
+  const store = new MemoryStore(now);
+  const stopSweeping = store.startSweeping(sweepIntervalMs);
+  const sockets = new Map<string, WebSocket>();
 
   const deps: Deps = {
     store,
     now,
     newId: randomUUID,
+    messageTtlSeconds,
     transport: {
       async post(connectionId: string, event: ServerEvent): Promise<boolean> {
         const socket = sockets.get(connectionId);
@@ -71,6 +84,7 @@ export async function startLocalServer(port = 0, host = '127.0.0.1'): Promise<Lo
     url: `ws://${host === '0.0.0.0' ? '127.0.0.1' : host}:${actualPort}`,
     store,
     async close() {
+      stopSweeping();
       for (const socket of sockets.values()) socket.terminate();
       wss.close();
       await new Promise<void>((resolve) => http.close(() => resolve()));

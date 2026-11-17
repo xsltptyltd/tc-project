@@ -6,6 +6,6 @@ import { onMessage } from '../core/router';
 export const handler = async (
   event: APIGatewayProxyWebsocketEventV2,
 ): Promise<APIGatewayProxyResult> => {
-  await onMessage(awsDeps(), event.requestContext.connectionId, event.body ?? '');
+  await onMessage(awsDeps(event.requestContext), event.requestContext.connectionId, event.body ?? '');
   return { statusCode: 200, body: '' };
 };

@@ -28,6 +28,9 @@ export class TcClient {
   private pending: Array<{ resolve(r: SendReceipt): void; reject(e: Error): void }> = [];
   private messageListeners: Array<(message: IncomingMessage) => void> = [];
   private closeListeners: Array<() => void> = [];
+  // A message sent while we are connecting can arrive twice: live, and in the answer
+  // to `fetch`. Listeners see each message once.
+  private delivered = new Set<string>();
 
   constructor(
     private readonly identity: Identity,
@@ -47,6 +50,8 @@ export class TcClient {
       let opened = false;
       socket.onopen = () => {
         opened = true;
+        // Ask for whatever arrived while this device was offline.
+        socket.send(JSON.stringify({ action: 'fetch' } satisfies ClientAction));
         resolve();
       };
       socket.onmessage = (event) => {
@@ -88,6 +93,17 @@ export class TcClient {
     });
   }
 
+  /**
+   * Takes back what this device sent to `to` and has not been delivered yet: the one
+   * message `messageId`, or all of them. The backend does not answer, so there is no way
+   * to know what was deleted — by design: that would say whether the receiver got it.
+   */
+  unsend(to: DeviceId, messageId?: string): void {
+    if (!this.socket || !this.connected) throw new Error('not connected');
+    const action: ClientAction = { action: 'unsend', to, ...(messageId !== undefined && { messageId }) };
+    this.socket.send(JSON.stringify(action));
+  }
+
   close(): Promise<void> {
     const socket = this.socket;
     if (!socket || socket.readyState === 3) return Promise.resolve(); // WebSocket.CLOSED
@@ -101,13 +117,21 @@ export class TcClient {
     switch (event.type) {
       case 'message': {
         const { id, from, ciphertext } = event.envelope;
+        if (this.delivered.has(id)) return;
         let text: string;
         try {
           text = decryptFrom(this.identity, from, ciphertext).text;
         } catch {
           return; // not for us, or not from who it claims: drop it
         }
+        if (this.messageListeners.length === 0) return; // nobody to give it to: keep it
+        this.delivered.add(id);
         for (const listener of this.messageListeners) listener({ id, from, text });
+        // The app has it now, so the backend deletes it (D9): from here on it exists only
+        // in this app's memory. If the connection is already gone, it comes again next time.
+        if (this.connected) {
+          this.socket?.send(JSON.stringify({ action: 'ack', messageId: id } satisfies ClientAction));
+        }
         return;
       }
       case 'sent':

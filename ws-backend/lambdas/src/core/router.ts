@@ -1,4 +1,4 @@
-import { ClientActionSchema, MESSAGE_TTL_SECONDS, type DeviceId, type Envelope } from 'tc-protocol';
+import { ClientActionSchema, type DeviceId, type Envelope } from 'tc-protocol';
 import type { Deps } from './ports';
 
 /** Handles one frame received on an open connection. */
@@ -27,8 +27,35 @@ export async function onMessage(deps: Deps, connectionId: string, body: string):
       await send(deps, connectionId, connection.deviceId, action.to, action.ciphertext);
       return;
     case 'ack':
-      await deps.transport.post(connectionId, { type: 'error', code: 'not_implemented' });
+      // The receiver comes from the connection, so nobody can delete someone else's
+      // message. No answer either way, and the sender is not told (D9, D14).
+      await deps.store.deleteMessage(connection.deviceId, action.messageId);
       return;
+    case 'fetch':
+      await fetchWaiting(deps, connectionId, connection.deviceId);
+      return;
+    case 'unsend':
+      // The sender comes from the connection: nobody can take back someone else's
+      // message. No answer, whatever was deleted (D14, D17).
+      await deps.store.unsendMessages(connection.deviceId, action.to, action.messageId);
+      return;
+  }
+}
+
+/**
+ * Delivers, to this connection only, the messages that arrived while the device was
+ * offline. Delivering does not delete: the device acknowledges what it received (D9),
+ * and anything it did not acknowledge comes again on the next fetch, until it expires.
+ */
+async function fetchWaiting(deps: Deps, connectionId: string, deviceId: DeviceId): Promise<void> {
+  for (const envelope of await deps.store.listMessages(deviceId, deps.now())) {
+    // Taken back by its sender since it was listed: it must not be delivered.
+    if (!(await deps.store.markDelivered(deviceId, envelope.id))) continue;
+    const reached = await deps.transport.post(connectionId, { type: 'message', envelope });
+    if (!reached) {
+      await deps.store.deleteConnection(connectionId);
+      return;
+    }
   }
 }
 
@@ -47,7 +74,7 @@ async function send(
     to,
     ciphertext,
     sentAt,
-    expiresAt: sentAt + MESSAGE_TTL_SECONDS,
+    expiresAt: sentAt + deps.messageTtlSeconds,
   };
   await deps.store.putMessage(envelope);
 
@@ -55,7 +82,11 @@ async function send(
   // same, and is sent before any delivery attempt, whether or not the receiver is online.
   await deps.transport.post(connectionId, { type: 'sent', messageId: envelope.id });
 
-  for (const target of await deps.store.listConnections(to)) {
+  const targets = await deps.store.listConnections(to);
+  // Marked before it is posted, so the sender can never take back something the receiver
+  // may already have — even if, in the end, no connection was still there to take it.
+  if (targets.length === 0 || !(await deps.store.markDelivered(to, envelope.id))) return;
+  for (const target of targets) {
     const reached = await deps.transport.post(target.connectionId, { type: 'message', envelope });
     if (!reached) await deps.store.deleteConnection(target.connectionId);
   }

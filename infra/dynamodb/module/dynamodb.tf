@@ -1,5 +1,6 @@
 # Single table. Only the base keys and one generic GSI are declared; add GSIs when an
-# access pattern actually needs one.
+# access pattern actually needs one. What sits where, and why GSI1 is enough for
+# connections and messages, is design/DECISIONS.md D16.
 resource "aws_dynamodb_table" "table" {
   name                        = "${var.project}-${var.stage}-${var.version-suffix}"
   billing_mode                = "PAY_PER_REQUEST"
@@ -24,7 +25,8 @@ resource "aws_dynamodb_table" "table" {
     type = "S"
   }
 
-  # Best-effort deletion only — readers must still filter on expiry (DECISIONS D9).
+  # Deletes each item some time after its `ttl` (epoch seconds) — AWS says typically within
+  # a few days — so readers must still filter on expiry (DECISIONS D8).
   ttl {
     attribute_name = "ttl"
     enabled        = true

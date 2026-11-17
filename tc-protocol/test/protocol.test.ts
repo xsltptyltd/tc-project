@@ -14,6 +14,17 @@ describe('ClientActionSchema', () => {
     expect(ClientActionSchema.safeParse({ action: 'ack', messageId: 'm1' }).success).toBe(true);
   });
 
+  it('accepts an unsend frame, for one message or for all', () => {
+    const one = { action: 'unsend', to: deviceId, messageId: 'm1' };
+    const all = { action: 'unsend', to: deviceId };
+    expect(ClientActionSchema.parse(one)).toEqual(one);
+    expect(ClientActionSchema.parse(all)).toEqual(all);
+  });
+
+  it('accepts a fetch frame', () => {
+    expect(ClientActionSchema.parse({ action: 'fetch' })).toEqual({ action: 'fetch' });
+  });
+
   it.each([
     ['unknown action', { action: 'delete', to: deviceId }],
     ['device id of the wrong length', { action: 'send', to: 'short', ciphertext: 'abc' }],
@@ -21,6 +32,9 @@ describe('ClientActionSchema', () => {
     ['empty ciphertext', { action: 'send', to: deviceId, ciphertext: '' }],
     ['oversized ciphertext', { action: 'send', to: deviceId, ciphertext: 'a'.repeat(16 * 1024 + 1) }],
     ['not an object', 'send'],
+    ['unsend without a receiver', { action: 'unsend', messageId: 'm1' }],
+    ['unsend to a bad receiver', { action: 'unsend', to: 'short' }],
+    ['unsend with an empty message id', { action: 'unsend', to: deviceId, messageId: '' }],
   ])('rejects %s', (_label, frame) => {
     expect(ClientActionSchema.safeParse(frame).success).toBe(false);
   });

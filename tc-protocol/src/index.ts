@@ -42,11 +42,34 @@ export type Payload = z.infer<typeof PayloadSchema>;
 /** Client → server frames. `action` is also the API Gateway route selection key. */
 export const ClientActionSchema = z.discriminatedUnion('action', [
   z.object({ action: z.literal('send'), to: DeviceIdSchema, ciphertext: CiphertextSchema }),
+  /**
+   * "I have this message; delete it." Only the receiver can delete a message. There is no
+   * answer, whether or not the message existed, and the sender is never told (D9, D14).
+   */
   z.object({ action: z.literal('ack'), messageId: z.string().min(1).max(64) }),
+  /**
+   * "Send me what is waiting for me." Sent by a device right after connecting: the
+   * backend answers with one `message` event per unexpired message addressed to it,
+   * oldest first, and nothing else. It is a frame rather than something the backend
+   * does on connect because API Gateway cannot post to a connection during `$connect`.
+   */
+  z.object({ action: z.literal('fetch') }),
+  /**
+   * "Take back what I sent to `to` that has not been delivered yet": the one message
+   * `messageId`, or, without it, all of them. Only the sender's own messages, and only
+   * until the backend starts handing one to its receiver. There is no answer, whatever
+   * was or was not deleted: anything else would tell the sender whether the receiver got
+   * it (D14, D17).
+   */
+  z.object({
+    action: z.literal('unsend'),
+    to: DeviceIdSchema,
+    messageId: z.string().min(1).max(64).optional(),
+  }),
 ]);
 export type ClientAction = z.infer<typeof ClientActionSchema>;
 
-export type ErrorCode = 'bad_request' | 'unknown_connection' | 'not_implemented';
+export type ErrorCode = 'bad_request' | 'unknown_connection';
 
 /**
  * Server → client frames.

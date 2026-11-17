@@ -7,8 +7,8 @@ Private one-to-one messaging for people who have met in person.
 - **Either person can end it.** Removing a contact removes you from the other phone too.
 - **The server cannot read messages.** They are encrypted on the sending phone and only the
   receiving phone can open them.
-- **Nothing is kept.** A message is deleted from the server when it is acknowledged, and
-  after 24 hours at the latest.
+- **Nothing is kept.** A message is deleted from the server when it is acknowledged, can be
+  taken back by its sender until delivered, and expires after 24 hours at the latest.
 - **No account.** No email, no phone number, no name — only your initials.
 
 Open source under the MIT licence. Status: **early** — a first slice runs locally (two clients exchanging encrypted messages
@@ -21,7 +21,7 @@ deployed. See `design/ROADMAP.md`.
  mobile-app ──wss──► API Gateway WebSocket ──► ws-backend λ ──► DynamoDB tc-{stage}-{v}
      │                    (authorizer λ)            │                 ▲
      │                                              └─► push (APNs/FCM) when offline
-     └──https──► API Gateway REST ──VTL──────────────────────────────┘   (missed messages)
+     └──https──► API Gateway REST ──VTL──────────────────────────────┘   (optional, deferred)
      └──https──► S3 (encrypted media, later)
 ```
 
@@ -30,7 +30,8 @@ deployed. See `design/ROADMAP.md`.
 - **Adding a contact.** See `design/DECISIONS.md` D1 and D5.
 - **One thread.** There are no per-contact conversations. Each message shows who sent it;
   tap a bubble to reply to that person. Sent messages show for one minute; received messages
-  disappear once acknowledged (by replying or ticking).
+  disappear once dismissed (by replying or ticking). The server's copy is gone before that:
+  it is deleted as soon as the phone has the message (`design/DECISIONS.md` D9).
 - **Names.** A contact appears under their initials (`PC`, or `PC2` if you already have a
   `PC`). You can give them a nickname on your phone; the server never sees it.
 - **What the server does know:** your initials, which devices are contacts, and when messages
@@ -45,7 +46,7 @@ deployed. See `design/ROADMAP.md`.
 | `ws-backend/` | the websocket backend: AWS SAM template + `lambdas/` (logic, handlers, local server) |
 | `tc-client/` | one device's connection to the backend (connect, send, receive), shared by the CLI and the app |
 | `cli/` | command-line client for local development |
-| `infra/` | Terraform, one stack per directory: `dynamodb/`, `api-gateway/` (REST, missed messages), `s3/` (media) |
+| `infra/` | Terraform, one stack per directory: `dynamodb/`, `api-gateway/` (optional missed-messages REST), `s3/` (media) |
 | `mobile-app/` | the React Native (Expo) app — Android first, iOS later (`DECISIONS.md` D12). One basic screen so far |
 | `design/` | `ROADMAP.md` (where this is going), `DECISIONS.md` (what was decided and why), `README-environments.md` |
 

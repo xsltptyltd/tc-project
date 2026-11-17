@@ -10,6 +10,6 @@ export const handler = async (
   const context = event.requestContext as { authorizer?: { principalId?: string } };
   const deviceId = DeviceIdSchema.safeParse(context.authorizer?.principalId);
   if (!deviceId.success) return { statusCode: 401, body: '' };
-  await onConnect(awsDeps(), event.requestContext.connectionId, deviceId.data);
+  await onConnect(awsDeps(event.requestContext), event.requestContext.connectionId, deviceId.data);
   return { statusCode: 200, body: '' };
 };

@@ -30,5 +30,10 @@ npm run cli -- chat alice --to $BOB
 
 Type a line in either chat and press enter; ctrl-d quits.
 
+Typing `> delete` on its own takes back everything you sent in this chat that the other
+person has not received yet (`design/DECISIONS.md` D17). What they have received stays.
+The CLI cannot tell you how many were deleted: the backend does not say, because that
+would tell you whether they had received them (D14).
+
 Identities are stored unencrypted in `./.tc/` (git-ignored). Development only.
 `TC_URL` selects another server (default `ws://127.0.0.1:8787`).

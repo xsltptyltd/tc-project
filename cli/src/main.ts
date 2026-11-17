@@ -6,11 +6,13 @@ import { createInterface } from 'node:readline';
 import { generateIdentity, init, type Identity } from 'tc-crypto';
 import { DeviceIdSchema } from 'tc-protocol';
 import { TcClient } from 'tc-client';
+import { DELETE_COMMAND, parseLine } from './commands';
 
 const USAGE = `usage:
   cli init <name>                  create an identity and print its device id
   cli id <name>                    print the device id
-  cli chat <name> --to <deviceId>  connect; each line typed is sent, incoming lines are printed
+  cli chat <name> --to <deviceId>  connect; each line typed is sent, incoming lines are printed;
+                                   "${DELETE_COMMAND}" takes back what they have not received yet
 
 environment:
   TC_URL   websocket url (default ws://127.0.0.1:8787)`;
@@ -62,8 +64,15 @@ async function main(): Promise<void> {
     console.log('connected — type a message and press enter (ctrl-d to quit)');
     const lines = createInterface({ input: process.stdin });
     for await (const line of lines) {
-      if (!line.trim()) continue;
-      await client.send(to.data, line);
+      const parsed = parseLine(line);
+      if (parsed.kind === 'skip') continue;
+      if (parsed.kind === 'delete') {
+        // The backend does not say what it deleted: that would say what was delivered.
+        client.unsend(to.data);
+        console.log('> deleted whatever they had not received yet');
+        continue;
+      }
+      await client.send(to.data, parsed.text);
       console.log('> sent');
     }
     quitting = true;

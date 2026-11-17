@@ -105,16 +105,45 @@ The integration is API Gateway → DynamoDB with no Lambda, but the request is a
 by the same authorizer as the websocket. The query's partition key comes from the
 authorizer, never from the request.
 
-## D8 — Expiry is enforced on read
+## D8 — After 24 hours a message is never delivered, and it is deleted
 
-DynamoDB's automatic deletion can lag by hours or days. Every read filters
-`expiresAt > now`. Same principle for media on S3.
+A message nobody acknowledged lives 24 hours (`MESSAGE_TTL_SECONDS`). Two mechanisms,
+because they guarantee different things:
 
-## D9 — Messages are deleted on acknowledgement
+- **Never delivered after expiry — exact, on read.** Every read skips anything with
+  `expiresAt <= now`, whatever the storage has or has not cleaned up yet.
+- **Deleted after expiry — in the background.** On DynamoDB, every message carries
+  `ttl = expiresAt` and the table's TTL deletes it; AWS does this "typically within a few
+  days", not to the second, which is why the read check above is needed. In memory, a
+  sweeper (`setInterval`, every second on the local server) deletes expired messages
+  whoever they are for, and a read sweeps first.
 
-A message stays on the backend until the receiver acknowledges it, or 24 hours. The phone
-keeps decrypted text in memory only and re-fetches the ciphertext after a lock or restart.
-The acknowledgement is between the receiver and the backend; the sender is not told (D14).
+The lifetime is a setting of the backend (`Deps.messageTtlSeconds`): 24 hours when
+deployed, as short as one second in tests and local runs (`MESSAGE_TTL_SECONDS=1 npm run
+dev:server`) to watch it happen — never longer than 24 hours. Times are whole seconds, so
+a lifetime of N seconds ends between N−1 and N seconds after sending.
+
+If deletion within days is ever not enough on DynamoDB, the next step is a scheduled
+sweep; it needs an index by expiry time, which GSI1 can carry (D16). Not built.
+
+Same principle for media on S3.
+
+## D9 — Messages are deleted on acknowledgement, as soon as they are received
+
+A message stays on the backend until the receiver acknowledges it, or 24 hours.
+
+- **The client acknowledges a message as soon as it has handed it to the app** — not when
+  a person dismisses it. From then on the message exists only in that app's memory:
+  close, clear or restart the app and it is gone, from everywhere. Like something said
+  aloud, it cannot be heard twice.
+- Only the receiver can delete a message: the backend takes the device from the
+  authenticated connection, never from the frame, and an acknowledgement naming someone
+  else's message does nothing.
+- The backend answers an acknowledgement with nothing — not even whether the message
+  existed — and the sender is not told (D14). Repeating one is harmless.
+- Delivery is at least once: a message the client never acknowledged (connection lost
+  first, nobody listening yet, or undecryptable) is delivered again on the next `fetch`,
+  until it expires. One that could not be decrypted is never acknowledged; it expires.
 
 ## D10 — Push notifications carry no content
 
@@ -168,6 +197,8 @@ read it.
 - When a message is sent, the backend answers only "accepted". The answer is identical,
   and is given before any delivery attempt, whether or not the receiver is online.
 - Acknowledging a message deletes it; the sender is not notified.
+- Taking back a message (D17) gets no answer, so it cannot tell the sender whether the
+  message had been delivered.
 - Nothing shows who is online, when someone was last seen, or that someone is typing.
 
 This is about what other people can learn. The backend itself necessarily knows which
@@ -175,3 +206,84 @@ devices are connected, in order to deliver messages; it does not pass that on.
 
 "For now": this can be revisited, but anything that reveals another person's activity
 needs its own decision here first.
+
+## D15 — Waiting messages are fetched over the websocket, right after connecting
+
+A message for a device that is offline stays stored (D8, D9). When the device connects it
+sends a `fetch` frame, and the backend answers on that connection with one `message` event
+per unexpired message addressed to it, oldest first.
+
+- **Why a frame and not a push on connect:** API Gateway does not let the backend post to
+  a connection while `$connect` is running, so anything sent from `$connect` would be lost.
+  A frame goes through `$default` and behaves the same locally and on AWS.
+- A message sent while the receiver is connecting can reach it twice (live, and in the
+  answer to `fetch`). Message ids are unique; the client shows each id once.
+- A delivered message is deleted when the device acknowledges it (D9). One it has not
+  acknowledged comes again on the next `fetch`.
+- Nothing about this is visible to the sender (D14).
+- The REST API for missed messages (D7) is not needed for this. Whether it is still wanted,
+  for example to read messages without opening a websocket, is open.
+
+## D16 — One DynamoDB table, keyed by who needs to find what
+
+Everything lives in the single table from `infra/dynamodb` (PK, SK, one generic GSI, TTL
+on `ttl`). The layout follows the access patterns, not the other way round:
+
+| Item | PK | SK | GSI1PK | GSI1SK |
+|---|---|---|---|---|
+| connection | `CONNECTION#<connectionId>` | `CONNECTION` | `DEVICE#<deviceId>` | `CONNECTION#<connectionId>` |
+| message | `DEVICE#<to>` | `MSG#<id>` | — | — |
+
+A message item also holds the envelope's fields, `ttl`, and `delivered: true` once it has
+been handed to its receiver (D17).
+
+- **Connections are keyed by connection id** because that is all a `$disconnect` event
+  carries. The other direction — every connection a device has, needed to deliver live —
+  is the one and only use of GSI1, which was declared for exactly this.
+- **Messages sit on the base table, in the receiver's partition, not on an index.** A GSI
+  can only be read with eventual consistency; the base table can be read strongly, so a
+  `fetch` sent right after connecting sees a message written a moment earlier. The REST
+  read (D7), acknowledgement (D9) and contact-break deletions (D5) all start from a
+  receiver the backend already knows — so none of them needs another index.
+- **The sort key is the message id, not the time.** An acknowledgement carries only the
+  id, and the receiver comes from the connection: together they are the exact key, so
+  acknowledging is one delete with no read first. Oldest-first order is restored by
+  sorting on `sentAt` after reading, which costs nothing because `fetch` reads the
+  receiver's whole partition anyway; the REST read (D7) will have to do the same.
+- **No new GSI**, for those reasons. One is added when an access pattern cannot be
+  answered from a partition the backend already knows — not before.
+- The `ttl` attribute is `expiresAt` on messages (best effort; reads still filter, D8)
+  and connect time + 3 hours on connections, which only matters if a `$disconnect` was
+  lost: API Gateway closes every websocket within 2 hours anyway.
+- Key prefixes (`CONNECTION#`, `MSG#`) keep the `DEVICE#<id>` partitions free for later
+  item types, contacts first of all.
+
+Implemented in `ws-backend/lambdas/src/adapters/dynamodb-store.ts`; the item shaping is
+pure and unit-tested, the calls to AWS are not (they never are).
+
+## D17 — A sender can take back a message until it is delivered
+
+A sender may delete what they sent and the receiver has not received yet: one message
+(`unsend` with its id — what an app would offer on a message) or everything they sent to
+one person (`unsend` without an id — the CLI's `> delete`). Only their own messages: the
+sender is taken from the authenticated connection, never from the frame.
+
+- **Delivered means handed over, not acknowledged.** The receiver can have a message on
+  screen before it acknowledges it, so the backend marks a message delivered the moment
+  it starts handing it to one of the receiver's connections — live, or in answer to
+  `fetch` — and a delivered message can no longer be taken back. It is marked *before*
+  it is posted: if the connection turns out to be gone, that message cannot be taken back
+  either, which is the safe side to err on.
+- **Whichever comes first wins.** Marking succeeds only if the message still exists, and
+  taking back succeeds only if it is not marked; on DynamoDB both are conditional writes.
+  So a message taken back is never delivered afterwards, even by a `fetch` already under
+  way, and a delivered one is never deleted by its sender.
+- **No answer, ever (D14).** Saying what was deleted would say what was delivered. The
+  backend answers `unsend` with nothing, so the CLI can only say "whatever they had not
+  received yet is gone", never how many.
+- The mark is backend bookkeeping: it is not part of the envelope, and it is deleted with
+  the message.
+- On DynamoDB this stays in the receiver's partition (the frame names the receiver): one
+  conditional delete for one message; for all, a consistent query of that partition for
+  the sender's undelivered messages, then one conditional delete each. No new index.
+
