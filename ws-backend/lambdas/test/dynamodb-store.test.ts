@@ -1,4 +1,4 @@
-// How connections and messages are shaped into items and keys, which is where a quiet
+// How connections, messages, contacts and invitations are shaped into items and keys, which is where a quiet
 // mistake (a wrong prefix, an unpadded number) would corrupt the table. What the store
 // then does with them is in store-contract.test.ts.
 import { describe, expect, it } from 'vitest';
@@ -8,6 +8,11 @@ import {
   connectionFrom,
   connectionItem,
   connectionKey,
+  contactItem,
+  contactKey,
+  invitationFrom,
+  invitationItem,
+  invitationKey,
   deviceConnectionItem,
   deviceConnectionKey,
   envelopeFrom,
@@ -92,5 +97,44 @@ describe('connection items', () => {
     const item = connectionItem(connection);
     expect(item.ttl - connection.connectedAt).toBe(CONNECTION_SWEEP_SECONDS);
     expect(CONNECTION_SWEEP_SECONDS).toBeGreaterThan(2 * 60 * 60);
+  });
+});
+
+describe('contact items', () => {
+  it('sit in their owner’s partition, one per side, beside its connections and messages', () => {
+    expect(contactKey(alice, bob)).toEqual({ PK: `DEVICE#${alice}`, SK: `CONTACT#${bob}` });
+    expect(contactKey(bob, alice)).toEqual({ PK: `DEVICE#${bob}`, SK: `CONTACT#${alice}` });
+    expect(contactItem(alice, bob)).toMatchObject(contactKey(alice, bob));
+  });
+
+  it('never share a sort key prefix with a connection or a message in the same partition', () => {
+    const sk = contactKey(alice, bob).SK;
+    expect(sk.startsWith('CONNECTION#')).toBe(false);
+    expect(sk.startsWith('MSG#')).toBe(false);
+    expect(deviceConnectionKey(alice, 'c').SK.startsWith('CONTACT#')).toBe(false);
+    expect(messageKey(alice, 'm').SK.startsWith('CONTACT#')).toBe(false);
+  });
+
+  it('hold who and whom, and nothing else — no names, no expiry: a contact lasts until removed', () => {
+    expect(contactItem(alice, bob)).toEqual({ ...contactKey(alice, bob), owner: alice, contact: bob });
+  });
+});
+
+describe('invitation items', () => {
+  const invitation = { tokenId: 'T'.repeat(43), inviter: alice, initials: 'AZ', expiresAt: 1_800_000_020 };
+
+  it('are found by token id alone — all an acceptance carries', () => {
+    expect(invitationKey('T'.repeat(43))).toEqual({ PK: `INVITATION#${'T'.repeat(43)}`, SK: 'INVITATION' });
+    expect(invitationItem(invitation)).toMatchObject(invitationKey(invitation.tokenId));
+  });
+
+  it('round-trip, accepted or not', () => {
+    expect(invitationFrom(invitationItem(invitation))).toEqual(invitation);
+    const accepted = { ...invitation, acceptedBy: bob };
+    expect(invitationFrom(invitationItem(accepted))).toEqual(accepted);
+  });
+
+  it('hand DynamoDB’s TTL their expiry, so they are deleted without anyone asking', () => {
+    expect(invitationItem(invitation).ttl).toBe(invitation.expiresAt);
   });
 });

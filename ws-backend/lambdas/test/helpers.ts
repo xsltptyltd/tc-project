@@ -1,5 +1,11 @@
 import { generateKeyPairSync, sign, type KeyObject } from 'node:crypto';
-import { authSigningString, formatAuthToken, MESSAGE_TTL_SECONDS, type ServerEvent } from 'tc-protocol';
+import {
+  authSigningString,
+  formatAuthToken,
+  INVITATION_TTL_SECONDS,
+  MESSAGE_TTL_SECONDS,
+  type ServerEvent,
+} from 'tc-protocol';
 import { MemoryStore } from '../src/adapters/memory-store';
 import type { Deps } from '../src/core/ports';
 
@@ -24,9 +30,16 @@ export function authToken(device: TestDevice, ts: number, claimedId = device.dev
  * `clock.now` is the current time in epoch seconds, shared by the deps and the store's
  * sweeper; tests may move it.
  */
-export function testDeps({ now = 1_800_000_000, messageTtlSeconds = MESSAGE_TTL_SECONDS } = {}) {
+export function testDeps({
+  now = 1_800_000_000,
+  messageTtlSeconds = MESSAGE_TTL_SECONDS,
+  invitationTtlSeconds = INVITATION_TTL_SECONDS,
+  /** Devices that start as contacts of each other, every pair of them (D19). */
+  contacts = [] as string[],
+} = {}) {
   const clock = { now };
   const store = new MemoryStore(() => clock.now);
+  for (const a of contacts) for (const b of contacts) if (a < b) store.addContact(a, b);
   const posted: Array<{ connectionId: string; event: ServerEvent }> = [];
   const gone = new Set<string>();
   let nextId = 1;
@@ -35,6 +48,8 @@ export function testDeps({ now = 1_800_000_000, messageTtlSeconds = MESSAGE_TTL_
     now: () => clock.now,
     newId: () => `m${nextId++}`,
     messageTtlSeconds,
+    contacts: store,
+    invitationTtlSeconds,
     transport: {
       async post(connectionId, event) {
         if (gone.has(connectionId)) return false;

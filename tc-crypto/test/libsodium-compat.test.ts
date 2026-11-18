@@ -3,7 +3,19 @@
 import sodium from 'libsodium-wrappers';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { authSigningString, parseAuthToken } from 'tc-protocol';
-import { createAuthToken, decryptFrom, encryptFor, generateIdentity, init, type Identity } from '../src';
+import {
+  createAuthToken,
+  decryptFrom,
+  encryptFor,
+  generateIdentity,
+  init,
+  invitationKey,
+  invitationMac,
+  invitationMacString,
+  invitationTokenId,
+  newInvitationSecret,
+  type Identity,
+} from '../src';
 
 const variant = () => sodium.base64_variants.URLSAFE_NO_PADDING;
 const b64 = (text: string) => sodium.from_base64(text, variant());
@@ -71,5 +83,25 @@ describe('compatibility with libsodium', () => {
       v: 1,
       text: 'from libsodium',
     });
+  });
+
+  it('derives invitation keys with libsodium crypto_auth, keyed by the secret', () => {
+    const secret = newInvitationSecret();
+    const theirs = sodium.crypto_auth('tc-invite-key-v1:room 1', b64(secret));
+    expect(invitationKey(secret, 'room 1')).toBe(sodium.to_base64(theirs, variant()));
+  });
+
+  it('makes invitation MACs that are libsodium crypto_auth (HMAC-SHA-512-256)', () => {
+    const key = invitationKey(newInvitationSecret(), 'room 1');
+    const [alice, bob] = [generateIdentity().deviceId, generateIdentity().deviceId];
+    const theirs = sodium.crypto_auth(invitationMacString(alice, bob, 'BB'), b64(key));
+    expect(invitationMac(key, alice, bob, 'BB')).toBe(sodium.to_base64(theirs, variant()));
+  });
+
+  it('derives invitation token ids as the first 32 bytes of SHA-512', () => {
+    const key = invitationKey(newInvitationSecret(), 'room 1');
+    const input = new Uint8Array([...sodium.from_string('tc-invite-token-v1:'), ...b64(key)]);
+    const theirs = sodium.crypto_hash(input).slice(0, 32); // libsodium's crypto_hash is SHA-512
+    expect(invitationTokenId(key)).toBe(sodium.to_base64(theirs, variant()));
   });
 });

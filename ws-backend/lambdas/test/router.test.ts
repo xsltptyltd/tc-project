@@ -14,7 +14,7 @@ const SENT_AT = 1_800_000_000;
 
 describe('send', () => {
   it('stores the message and delivers it to a connected receiver', async () => {
-    const t = testDeps();
+    const t = testDeps({ contacts: [alice, bob, carol] });
     await onConnect(t.deps, 'conn-a', alice);
     await onConnect(t.deps, 'conn-b', bob);
 
@@ -34,7 +34,7 @@ describe('send', () => {
   });
 
   it('stores the message when the receiver is offline', async () => {
-    const t = testDeps();
+    const t = testDeps({ contacts: [alice, bob, carol] });
     await onConnect(t.deps, 'conn-a', alice);
 
     await onMessage(t.deps, 'conn-a', send(bob));
@@ -44,12 +44,12 @@ describe('send', () => {
   });
 
   it('tells the sender the same thing whether or not the receiver is online', async () => {
-    const online = testDeps();
+    const online = testDeps({ contacts: [alice, bob, carol] });
     await onConnect(online.deps, 'conn-a', alice);
     await onConnect(online.deps, 'conn-b', bob);
     await onMessage(online.deps, 'conn-a', send(bob));
 
-    const offline = testDeps();
+    const offline = testDeps({ contacts: [alice, bob, carol] });
     await onConnect(offline.deps, 'conn-a', alice);
     await onMessage(offline.deps, 'conn-a', send(bob));
 
@@ -57,7 +57,7 @@ describe('send', () => {
   });
 
   it('answers the sender before trying to deliver', async () => {
-    const t = testDeps();
+    const t = testDeps({ contacts: [alice, bob, carol] });
     await onConnect(t.deps, 'conn-a', alice);
     await onConnect(t.deps, 'conn-b', bob);
     await onMessage(t.deps, 'conn-a', send(bob));
@@ -65,7 +65,7 @@ describe('send', () => {
   });
 
   it('delivers to every connection of the receiver', async () => {
-    const t = testDeps();
+    const t = testDeps({ contacts: [alice, bob, carol] });
     await onConnect(t.deps, 'conn-a', alice);
     await onConnect(t.deps, 'conn-b1', bob);
     await onConnect(t.deps, 'conn-b2', bob);
@@ -77,7 +77,7 @@ describe('send', () => {
   });
 
   it('forgets a connection that has gone away', async () => {
-    const t = testDeps();
+    const t = testDeps({ contacts: [alice, bob, carol] });
     await onConnect(t.deps, 'conn-a', alice);
     await onConnect(t.deps, 'conn-b', bob);
     t.gone.add('conn-b');
@@ -89,7 +89,7 @@ describe('send', () => {
   });
 
   it('takes the sender from the connection, not from the frame', async () => {
-    const t = testDeps();
+    const t = testDeps({ contacts: [alice, bob, carol] });
     await onConnect(t.deps, 'conn-a', alice);
     await onMessage(t.deps, 'conn-a', JSON.stringify({ action: 'send', to: bob, ciphertext: 'abc', from: bob }));
     expect(t.store.messages.get('m1')?.from).toBe(alice);
@@ -102,7 +102,7 @@ describe('bad input', () => {
     ['unknown action', JSON.stringify({ action: 'shout' })],
     ['bad receiver', send('nobody')],
   ])('answers bad_request for %s', async (_label, body) => {
-    const t = testDeps();
+    const t = testDeps({ contacts: [alice, bob, carol] });
     await onConnect(t.deps, 'conn-a', alice);
     await onMessage(t.deps, 'conn-a', body);
     expect(t.eventsFor('conn-a')).toEqual([{ type: 'error', code: 'bad_request' }]);
@@ -110,14 +110,14 @@ describe('bad input', () => {
   });
 
   it('refuses a connection it does not know', async () => {
-    const t = testDeps();
+    const t = testDeps({ contacts: [alice, bob, carol] });
     await onMessage(t.deps, 'stranger', send(bob));
     expect(t.eventsFor('stranger')).toEqual([{ type: 'error', code: 'unknown_connection' }]);
     expect(t.store.messages.size).toBe(0);
   });
 
   it('stops accepting frames after disconnect', async () => {
-    const t = testDeps();
+    const t = testDeps({ contacts: [alice, bob, carol] });
     await onConnect(t.deps, 'conn-a', alice);
     await onDisconnect(t.deps, 'conn-a');
     await onMessage(t.deps, 'conn-a', send(bob));
@@ -128,7 +128,7 @@ describe('bad input', () => {
 
 describe('fetch', () => {
   it('delivers messages sent while the receiver was offline, oldest first', async () => {
-    const t = testDeps();
+    const t = testDeps({ contacts: [alice, bob, carol] });
     await onConnect(t.deps, 'conn-a', alice);
     await onMessage(t.deps, 'conn-a', send(bob, 'b25l'));
     await onMessage(t.deps, 'conn-a', send(bob, 'dHdv'));
@@ -148,7 +148,7 @@ describe('fetch', () => {
   });
 
   it('delivers only messages addressed to the device that asks', async () => {
-    const t = testDeps();
+    const t = testDeps({ contacts: [alice, bob, carol] });
     await onConnect(t.deps, 'conn-a', alice);
     await onMessage(t.deps, 'conn-a', send(carol));
     await onMessage(t.deps, 'conn-a', send(bob));
@@ -162,7 +162,7 @@ describe('fetch', () => {
   });
 
   it('answers only the connection that asks', async () => {
-    const t = testDeps();
+    const t = testDeps({ contacts: [alice, bob, carol] });
     await onConnect(t.deps, 'conn-a', alice);
     await onMessage(t.deps, 'conn-a', send(bob));
     await onConnect(t.deps, 'conn-b1', bob);
@@ -175,14 +175,14 @@ describe('fetch', () => {
   });
 
   it('sends nothing when nothing is waiting', async () => {
-    const t = testDeps();
+    const t = testDeps({ contacts: [alice, bob, carol] });
     await onConnect(t.deps, 'conn-b', bob);
     await onMessage(t.deps, 'conn-b', fetchFrame);
     expect(t.posted).toEqual([]);
   });
 
   it('keeps a delivered message that was not acknowledged, so a reconnecting device gets it again', async () => {
-    const t = testDeps();
+    const t = testDeps({ contacts: [alice, bob, carol] });
     await onConnect(t.deps, 'conn-a', alice);
     await onMessage(t.deps, 'conn-a', send(bob));
 
@@ -197,7 +197,7 @@ describe('fetch', () => {
   });
 
   it('delivers a message until its last second, never after 24 hours', async () => {
-    const t = testDeps();
+    const t = testDeps({ contacts: [alice, bob, carol] });
     await onConnect(t.deps, 'conn-a', alice);
     await onMessage(t.deps, 'conn-a', send(bob));
     await onConnect(t.deps, 'conn-b', bob);
@@ -212,7 +212,7 @@ describe('fetch', () => {
   });
 
   it('delivers the unexpired messages and not the expired ones', async () => {
-    const t = testDeps();
+    const t = testDeps({ contacts: [alice, bob, carol] });
     await onConnect(t.deps, 'conn-a', alice);
     await onMessage(t.deps, 'conn-a', send(bob)); // m1, expires first
     t.clock.now += 3600;
@@ -226,7 +226,7 @@ describe('fetch', () => {
   });
 
   it('removes expired messages from the in-memory store', async () => {
-    const t = testDeps();
+    const t = testDeps({ contacts: [alice, bob, carol] });
     await onConnect(t.deps, 'conn-a', alice);
     await onMessage(t.deps, 'conn-a', send(bob));
     await onMessage(t.deps, 'conn-a', send(carol));
@@ -240,7 +240,7 @@ describe('fetch', () => {
   });
 
   it('stops and forgets the connection if it has gone away', async () => {
-    const t = testDeps();
+    const t = testDeps({ contacts: [alice, bob, carol] });
     await onConnect(t.deps, 'conn-a', alice);
     await onMessage(t.deps, 'conn-a', send(bob));
     await onMessage(t.deps, 'conn-a', send(bob));
@@ -254,7 +254,7 @@ describe('fetch', () => {
   });
 
   it('refuses a connection it does not know', async () => {
-    const t = testDeps();
+    const t = testDeps({ contacts: [alice, bob, carol] });
     await onConnect(t.deps, 'conn-a', alice);
     await onMessage(t.deps, 'conn-a', send(bob));
 
@@ -266,7 +266,7 @@ describe('fetch', () => {
 
 describe('ack', () => {
   it('deletes the message, so it is not delivered again', async () => {
-    const t = testDeps();
+    const t = testDeps({ contacts: [alice, bob, carol] });
     await onConnect(t.deps, 'conn-a', alice);
     await onMessage(t.deps, 'conn-a', send(bob));
     await onConnect(t.deps, 'conn-b1', bob);
@@ -283,7 +283,7 @@ describe('ack', () => {
   });
 
   it('deletes only the message it names', async () => {
-    const t = testDeps();
+    const t = testDeps({ contacts: [alice, bob, carol] });
     await onConnect(t.deps, 'conn-a', alice);
     await onMessage(t.deps, 'conn-a', send(bob));
     await onMessage(t.deps, 'conn-a', send(bob));
@@ -295,7 +295,7 @@ describe('ack', () => {
   });
 
   it('deletes a message delivered live, too', async () => {
-    const t = testDeps();
+    const t = testDeps({ contacts: [alice, bob, carol] });
     await onConnect(t.deps, 'conn-a', alice);
     await onConnect(t.deps, 'conn-b', bob);
     await onMessage(t.deps, 'conn-a', send(bob));
@@ -309,7 +309,7 @@ describe('ack', () => {
     ['the sender', () => alice],
     ['a third device', () => carol],
   ])('cannot be used by %s to delete someone else’s message', async (_label, who) => {
-    const t = testDeps();
+    const t = testDeps({ contacts: [alice, bob, carol] });
     await onConnect(t.deps, 'conn-a', alice);
     await onMessage(t.deps, 'conn-a', send(bob));
     await onConnect(t.deps, 'conn-x', who());
@@ -321,7 +321,7 @@ describe('ack', () => {
   });
 
   it('answers nothing, and tells the sender nothing', async () => {
-    const t = testDeps();
+    const t = testDeps({ contacts: [alice, bob, carol] });
     await onConnect(t.deps, 'conn-a', alice);
     await onMessage(t.deps, 'conn-a', send(bob));
     await onConnect(t.deps, 'conn-b', bob);
@@ -333,7 +333,7 @@ describe('ack', () => {
   });
 
   it('is harmless when repeated or when the message does not exist', async () => {
-    const t = testDeps();
+    const t = testDeps({ contacts: [alice, bob, carol] });
     await onConnect(t.deps, 'conn-a', alice);
     await onMessage(t.deps, 'conn-a', send(bob));
     await onConnect(t.deps, 'conn-b', bob);
@@ -346,7 +346,7 @@ describe('ack', () => {
   });
 
   it('refuses a connection it does not know', async () => {
-    const t = testDeps();
+    const t = testDeps({ contacts: [alice, bob, carol] });
     await onConnect(t.deps, 'conn-a', alice);
     await onMessage(t.deps, 'conn-a', send(bob));
 

@@ -27,13 +27,14 @@ deployed. See `design/ROADMAP.md`.
 
 - **Identity.** On first launch the app generates a key pair. The public key is the device's
   identity; the server authenticates a device by a signature, never by an id alone.
-- **Adding a contact.** See `design/DECISIONS.md` D1 and D5.
+- **Adding a contact.** See `design/DECISIONS.md` D1 and D5; what is built so far, D18.
+  Only contacts can write to each other (D19).
 - **One thread.** There are no per-contact conversations. Each message shows who sent it;
   tap a bubble to reply to that person. Sent messages show for one minute; received messages
   disappear once dismissed (by replying or ticking). The server's copy is gone before that:
   it is deleted as soon as the phone has the message (`design/DECISIONS.md` D9).
 - **Names.** A contact appears under their initials (`PC`, or `PC2` if you already have a
-  `PC`). You can give them a nickname on your phone; the server never sees it.
+  `PC`). You can give them an alias on your phone; the server never sees either.
 - **What the server does know:** your initials, which devices are contacts, and when messages
   pass. Content is private; this metadata is not.
 
@@ -62,6 +63,7 @@ npm test             # all tests, no AWS needed
 npm run typecheck    # the phone app has its own: npm --prefix mobile-app run typecheck
 npm run dev:server   # local websocket server
 npm run cli -- ...   # command-line client, see cli/README.md
+npm run simulation   # twenty people meet at random, to have contact lists to look at
 npm run app          # the phone app; needs its own install first, see mobile-app/README.md
 ```
 

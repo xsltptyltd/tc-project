@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ClientActionSchema, formatAuthToken, parseAuthToken } from '../src';
+import { ClientActionSchema, formatAuthToken, InitialsSchema, parseAuthToken } from '../src';
 
 const deviceId = 'A'.repeat(43);
 const sig = 'b'.repeat(86);
@@ -23,6 +23,30 @@ describe('ClientActionSchema', () => {
 
   it('accepts a fetch frame', () => {
     expect(ClientActionSchema.parse({ action: 'fetch' })).toEqual({ action: 'fetch' });
+  });
+
+  const tokenId = 'T'.repeat(43);
+  const mac = 'M'.repeat(43);
+
+  it('accepts an invite frame', () => {
+    const frame = { action: 'invite', tokenId, initials: 'AZ' };
+    expect(ClientActionSchema.parse(frame)).toEqual(frame);
+  });
+
+  it('accepts an accept frame', () => {
+    const frame = { action: 'accept', tokenId, inviter: deviceId, initials: 'BB', mac };
+    expect(ClientActionSchema.parse(frame)).toEqual(frame);
+  });
+
+  it.each([
+    ['invite without initials', { action: 'invite', tokenId }],
+    ['invite with bad initials', { action: 'invite', tokenId, initials: 'az' }],
+    ['invite with a short token id', { action: 'invite', tokenId: 'abc', initials: 'AZ' }],
+    ['accept without a MAC', { action: 'accept', tokenId, inviter: deviceId, initials: 'BB' }],
+    ['accept with a bad inviter', { action: 'accept', tokenId, inviter: 'short', initials: 'BB', mac }],
+    ['accept with bad initials', { action: 'accept', tokenId, inviter: deviceId, initials: 'B2', mac }],
+  ])('rejects %s', (_label, frame) => {
+    expect(ClientActionSchema.safeParse(frame).success).toBe(false);
   });
 
   it.each([
@@ -54,5 +78,23 @@ describe('auth token', () => {
     ['empty', ''],
   ])('rejects %s', (_label, raw) => {
     expect(parseAuthToken(raw)).toBeUndefined();
+  });
+});
+
+describe('initials', () => {
+  it.each(['A', 'AZ', 'PC', 'ABCD'])('accepts %j', (initials) => {
+    expect(InitialsSchema.parse(initials)).toBe(initials);
+  });
+
+  it.each([
+    ['empty', ''],
+    ['five letters', 'ABCDE'],
+    ['lower case', 'az'],
+    ['a digit, which would read as a label (D13)', 'PC2'],
+    ['a space', 'A Z'],
+    ['a letter outside A–Z', 'É'],
+    ['a look-alike from another script', 'А'], // Cyrillic
+  ])('rejects %s', (_label, initials) => {
+    expect(InitialsSchema.safeParse(initials).success).toBe(false);
   });
 });

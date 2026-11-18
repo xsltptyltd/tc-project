@@ -1,4 +1,6 @@
 import { ClientActionSchema, type DeviceId, type Envelope } from 'tc-protocol';
+import { listContacts, removeContact } from './contacts';
+import { accept, invite } from './invitations';
 import type { Deps } from './ports';
 
 /** Handles one frame received on an open connection. */
@@ -39,6 +41,18 @@ export async function onMessage(deps: Deps, connectionId: string, body: string):
       // message. No answer, whatever was deleted (D14, D17).
       await deps.store.unsendMessages(connection.deviceId, action.to, action.messageId);
       return;
+    case 'invite':
+      await invite(deps, connectionId, connection.deviceId, action.tokenId, action.initials);
+      return;
+    case 'accept':
+      await accept(deps, connectionId, connection.deviceId, action);
+      return;
+    case 'remove':
+      await removeContact(deps, connectionId, connection.deviceId, action.contact);
+      return;
+    case 'contacts':
+      await listContacts(deps, connectionId, connection.deviceId);
+      return;
   }
 }
 
@@ -66,6 +80,12 @@ async function send(
   to: DeviceId,
   ciphertext: string,
 ): Promise<void> {
+  // Only to a contact (D19). Refused before anything is stored.
+  if (!(await deps.contacts.isContact(from, to))) {
+    await deps.transport.post(connectionId, { type: 'error', code: 'not_a_contact' });
+    return;
+  }
+
   const sentAt = deps.now();
   // The sender is taken from the authenticated connection, never from the frame.
   const envelope: Envelope = {

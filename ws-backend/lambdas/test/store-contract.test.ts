@@ -2,11 +2,12 @@
 // DynamoDB one talking to an in-memory stand-in for the DynamoDB client. The second half
 // runs whole conversations through the router on each, so the two cannot drift apart.
 import { describe, expect, it } from 'vitest';
-import { MESSAGE_TTL_SECONDS, type Envelope, type ServerEvent } from 'tc-protocol';
-import { DynamoStore } from '../src/adapters/dynamodb-store';
+import { INVITATION_TTL_SECONDS, MESSAGE_TTL_SECONDS, type Envelope, type ServerEvent } from 'tc-protocol';
+import { PutCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb';
+import { contactItem, DynamoStore } from '../src/adapters/dynamodb-store';
 import { MemoryStore } from '../src/adapters/memory-store';
 import { onConnect, onDisconnect } from '../src/core/connections';
-import type { Deps, Store } from '../src/core/ports';
+import type { ContactStore, Deps, Store } from '../src/core/ports';
 import { onMessage } from '../src/core/router';
 import { FakeDynamoDB } from './fake-dynamodb';
 import { newDevice } from './helpers';
@@ -26,13 +27,14 @@ const envelope = (over: Partial<Envelope> = {}): Envelope => ({
   ...over,
 });
 
-const stores: Array<[string, () => Store]> = [
+const stores: Array<[string, () => Store & ContactStore]> = [
   ['in memory', () => new MemoryStore(() => NOW)],
   // Two items per page, so anything longer than that only works if paging does.
   ['on DynamoDB (stand-in client)', () => new DynamoStore('table', new FakeDynamoDB(2))],
 ];
 
 const ids = (messages: Envelope[]) => messages.map((m) => m.id);
+
 
 describe.each(stores)('a store %s', (_name, newStore) => {
   describe('connections', () => {
@@ -174,6 +176,23 @@ describe.each(stores)('a store %s', (_name, newStore) => {
       expect(ids(await store.listMessages(bob, NOW))).toEqual(['fromCarol']);
     });
 
+    it('deletes everything between two devices, both ways, delivered or not, and nothing else', async () => {
+      const store = newStore();
+      await store.putMessage(envelope({ id: 'a-to-b', from: alice, to: bob }));
+      await store.putMessage(envelope({ id: 'b-to-a', from: bob, to: alice }));
+      await store.putMessage(envelope({ id: 'seen', from: alice, to: bob, sentAt: NOW + 1 }));
+      await store.putMessage(envelope({ id: 'c-to-b', from: carol, to: bob }));
+      await store.putMessage(envelope({ id: 'a-to-c', from: alice, to: carol }));
+      for (let i = 0; i < 5; i++) await store.putMessage(envelope({ id: `many${i}`, from: bob, to: alice, sentAt: NOW + i }));
+      await store.markDelivered(bob, 'seen');
+
+      await store.deleteMessagesBetween(bob, alice);
+      expect(ids(await store.listMessages(bob, NOW))).toEqual(['c-to-b']);
+      expect(await store.listMessages(alice, NOW)).toEqual([]);
+      expect(ids(await store.listMessages(carol, NOW))).toEqual(['a-to-c']);
+      await expect(store.deleteMessagesBetween(bob, alice)).resolves.toBeUndefined(); // again: harmless
+    });
+
     it('is not troubled by taking back what is not there', async () => {
       const store = newStore();
       await expect(store.unsendMessages(alice, bob, 'nope')).resolves.toBeUndefined();
@@ -185,15 +204,22 @@ describe.each(stores)('a store %s', (_name, newStore) => {
     const send = (to: string) => JSON.stringify({ action: 'send', to, ciphertext: 'c2VjcmV0' });
     const frame = (action: object) => JSON.stringify(action);
 
-    function world() {
+    const token = (n: number) => String(n).padStart(43, 'T');
+    const mac = 'M'.repeat(43);
+
+    /** One store holds everything — messages, connections, invitations, contacts. */
+    async function world({ strangers = false } = {}) {
       const clock = { now: NOW };
       const posted: Array<{ connectionId: string; event: ServerEvent }> = [];
       let nextId = 1;
+      const store = newStore();
       const deps: Deps = {
-        store: newStore(),
+        store,
         now: () => clock.now,
         newId: () => `m${nextId++}`,
         messageTtlSeconds: MESSAGE_TTL_SECONDS,
+        contacts: store,
+        invitationTtlSeconds: INVITATION_TTL_SECONDS,
         transport: {
           async post(connectionId, event) {
             posted.push({ connectionId, event });
@@ -205,11 +231,17 @@ describe.each(stores)('a store %s', (_name, newStore) => {
         posted.flatMap((p) =>
           p.connectionId === connectionId && p.event.type === 'message' ? [p.event.envelope.id] : [],
         );
-      return { deps, clock, posted, received };
+      const answers = (connectionId: string) => posted.filter((p) => p.connectionId === connectionId).map((p) => p.event);
+      // alice and bob are contacts the only way there is: an invitation, accepted.
+      if (!strangers) {
+        await store.putInvitation({ tokenId: token(0), inviter: alice, initials: 'AZ', expiresAt: NOW + 20 });
+        await store.acceptInvitation(token(0), { inviter: alice, invitee: bob }, NOW);
+      }
+      return { deps, store, clock, posted, received, answers };
     }
 
     it('keeps messages for someone offline and hands them over on fetch, then forgets them on ack', async () => {
-      const { deps, received } = world();
+      const { deps, received } = await world();
       await onConnect(deps, 'a', alice);
       for (let i = 0; i < 5; i++) await onMessage(deps, 'a', send(bob));
 
@@ -225,7 +257,7 @@ describe.each(stores)('a store %s', (_name, newStore) => {
     });
 
     it('pushes to a receiver who connected a moment before the message was sent', async () => {
-      const { deps, received } = world();
+      const { deps, received } = await world();
       await onConnect(deps, 'a', alice);
       await onConnect(deps, 'b', bob);
       await onMessage(deps, 'b', frame({ action: 'fetch' })); // nothing yet
@@ -234,7 +266,7 @@ describe.each(stores)('a store %s', (_name, newStore) => {
     });
 
     it('takes back what was not delivered, and only that', async () => {
-      const { deps, received } = world();
+      const { deps, received } = await world();
       await onConnect(deps, 'a', alice);
       await onConnect(deps, 'b', bob);
       await onMessage(deps, 'a', send(bob)); // m1, delivered live
@@ -249,13 +281,86 @@ describe.each(stores)('a store %s', (_name, newStore) => {
     });
 
     it('never delivers after 24 hours', async () => {
-      const { deps, clock, received } = world();
+      const { deps, clock, received } = await world();
       await onConnect(deps, 'a', alice);
       await onMessage(deps, 'a', send(bob));
       clock.now += MESSAGE_TTL_SECONDS;
       await onConnect(deps, 'b', bob);
       await onMessage(deps, 'b', frame({ action: 'fetch' }));
       expect(received('b')).toEqual([]);
+    });
+
+    it('lets two strangers write only once one has accepted the other’s invitation', async () => {
+      const { deps, answers, received } = await world({ strangers: true });
+      await onConnect(deps, 'a', alice);
+      await onConnect(deps, 'b', bob);
+      await onMessage(deps, 'a', send(bob));
+      expect(answers('a')).toEqual([{ type: 'error', code: 'not_a_contact' }]);
+
+      await onMessage(deps, 'a', frame({ action: 'invite', tokenId: token(1), initials: 'AZ' }));
+      await onMessage(deps, 'b', frame({ action: 'accept', tokenId: token(1), inviter: alice, initials: 'BB', mac }));
+      expect(answers('b')).toEqual([{ type: 'accepted', inviter: alice, initials: 'AZ' }]);
+      expect(answers('a').at(-1)).toEqual({ type: 'invitee', tokenId: token(1), invitee: bob, initials: 'BB', mac });
+
+      await onMessage(deps, 'a', send(bob));
+      await onMessage(deps, 'b', send(alice));
+      expect(received('b')).toHaveLength(1);
+      expect(received('a')).toHaveLength(1);
+    });
+
+    it('lets an invitation be accepted once, and not after it expires', async () => {
+      const { deps, clock, answers } = await world({ strangers: true });
+      await onConnect(deps, 'a', alice);
+      await onConnect(deps, 'b', bob);
+      await onConnect(deps, 'c', carol);
+      await onMessage(deps, 'a', frame({ action: 'invite', tokenId: token(1), initials: 'AZ' }));
+      await onMessage(deps, 'a', frame({ action: 'invite', tokenId: token(2), initials: 'AZ' }));
+      await onMessage(deps, 'b', frame({ action: 'accept', tokenId: token(1), inviter: alice, initials: 'BB', mac }));
+      await onMessage(deps, 'c', frame({ action: 'accept', tokenId: token(1), inviter: alice, initials: 'CC', mac }));
+      clock.now += INVITATION_TTL_SECONDS;
+      await onMessage(deps, 'c', frame({ action: 'accept', tokenId: token(2), inviter: alice, initials: 'CC', mac }));
+      expect(answers('c')).toEqual([
+        { type: 'error', code: 'invitation_invalid' },
+        { type: 'error', code: 'invitation_invalid' },
+      ]);
+      await onMessage(deps, 'c', send(alice));
+      expect(answers('c').at(-1)).toEqual({ type: 'error', code: 'not_a_contact' });
+    });
+
+    it('ends a contact for both, deletes what was waiting, tells both sides, and the lists agree', async () => {
+      const { deps, answers, received } = await world();
+      await onConnect(deps, 'a', alice);
+      for (let i = 0; i < 3; i++) await onMessage(deps, 'a', send(bob)); // bob offline: waiting
+      await onConnect(deps, 'b', bob);
+      await onConnect(deps, 'b2', bob);
+
+      await onMessage(deps, 'b', frame({ action: 'remove', contact: alice }));
+      expect(answers('b').at(-1)).toEqual({ type: 'contact_removed', contact: alice });
+      expect(answers('b')).toContainEqual({ type: 'removed', contact: alice });
+      expect(answers('b2')).toEqual([{ type: 'contact_removed', contact: alice }]);
+      expect(answers('a').at(-1)).toEqual({ type: 'contact_removed', contact: bob });
+
+      await onMessage(deps, 'b', frame({ action: 'fetch' }));
+      expect(received('b')).toEqual([]); // the three waiting messages are gone
+      await onMessage(deps, 'a', frame({ action: 'contacts' }));
+      await onMessage(deps, 'b', frame({ action: 'contacts' }));
+      expect(answers('a').at(-1)).toEqual({ type: 'contacts', contacts: [] });
+      expect(answers('b').at(-1)).toEqual({ type: 'contacts', contacts: [] });
+      await onMessage(deps, 'a', send(bob));
+      expect(answers('a').at(-1)).toEqual({ type: 'error', code: 'not_a_contact' });
+    });
+
+    it('lists every contact of a device, however many', async () => {
+      const { deps, store, answers } = await world({ strangers: true });
+      const friends = Array.from({ length: 7 }, () => newDevice().deviceId);
+      for (const [i, friend] of friends.entries()) {
+        await store.putInvitation({ tokenId: token(10 + i), inviter: alice, initials: 'AZ', expiresAt: NOW + 20 });
+        await store.acceptInvitation(token(10 + i), { inviter: alice, invitee: friend }, NOW);
+      }
+      await onConnect(deps, 'a', alice);
+      await onMessage(deps, 'a', frame({ action: 'contacts' }));
+      const [answer] = answers('a');
+      expect(answer?.type === 'contacts' && [...answer.contacts].sort()).toEqual([...friends].sort());
     });
   });
 });
@@ -294,19 +399,149 @@ describe('the DynamoDB store, specifically', () => {
   it('never reads an index, so every read can be strongly consistent', async () => {
     const db = new FakeDynamoDB();
     const send = db.send.bind(db);
-    const inputs: any[] = [];
-    db.send = async (command) => (inputs.push(command.input), send(command));
+    const commands: Array<{ name: string; input: any }> = [];
+    db.send = async (command) => (commands.push({ name: command.constructor.name, input: command.input }), send(command));
     const store = new DynamoStore('table', db);
     await store.putConnection({ connectionId: 'c1', deviceId: alice, connectedAt: NOW });
     await store.getConnection('c1');
     await store.listConnections(alice);
     await store.listMessages(alice, NOW);
     await store.unsendMessages(alice, bob);
-    const reads = inputs.filter((input) => 'Key' in input === false && 'KeyConditionExpression' in input);
-    expect(reads.length).toBeGreaterThan(0);
-    for (const read of reads) {
-      expect(read.IndexName).toBeUndefined();
-      expect(read.ConsistentRead).toBe(true);
+    await store.deleteMessagesBetween(alice, bob);
+    await store.putInvitation({ tokenId: 'T'.repeat(43), inviter: alice, initials: 'AZ', expiresAt: NOW + 20 });
+    await store.acceptInvitation('T'.repeat(43), { inviter: alice, invitee: bob }, NOW);
+    await store.isContact(alice, bob);
+    await store.listContacts(alice);
+    const reads = commands.filter((c) => c.name === 'QueryCommand' || c.name === 'GetCommand');
+    expect(new Set(reads.map((r) => r.name))).toEqual(new Set(['QueryCommand', 'GetCommand']));
+    for (const { input } of reads) {
+      expect(input.IndexName).toBeUndefined();
+      expect(input.ConsistentRead).toBe(true);
     }
+  });
+
+  it('accepts an invitation with one read and one transaction: taken, and both sides written', async () => {
+    const db = new FakeDynamoDB();
+    const store = new DynamoStore('table', db);
+    await store.putInvitation({ tokenId: 'T'.repeat(43), inviter: alice, initials: 'AZ', expiresAt: NOW + 20 });
+    db.calls.length = 0;
+    const send = db.send.bind(db);
+    let transaction: any;
+    db.send = async (command) => {
+      if (command.constructor.name === 'TransactWriteCommand') transaction = command.input;
+      return send(command);
+    };
+    await store.acceptInvitation('T'.repeat(43), { inviter: alice, invitee: bob }, NOW);
+    expect(db.calls).toEqual(['GetCommand', 'TransactWriteCommand']);
+    expect(transaction.TransactItems.map((t: object) => Object.keys(t)[0])).toEqual(['Update', 'Put', 'Put']);
+  });
+
+  it('refuses a bad acceptance without a transaction, from the read alone', async () => {
+    const db = new FakeDynamoDB();
+    const store = new DynamoStore('table', db);
+    await store.putInvitation({ tokenId: 'T'.repeat(43), inviter: alice, initials: 'AZ', expiresAt: NOW + 20 });
+    db.calls.length = 0;
+    await store.acceptInvitation('U'.repeat(43), { inviter: alice, invitee: bob }, NOW); // unknown
+    await store.acceptInvitation('T'.repeat(43), { inviter: carol, invitee: bob }, NOW); // not carol's
+    await store.acceptInvitation('T'.repeat(43), { inviter: alice, invitee: bob }, NOW + 20); // expired
+    expect(db.calls).toEqual(['GetCommand', 'GetCommand', 'GetCommand']);
+  });
+
+  it('removes a contact in one transaction, and leaves nothing of it in the table', async () => {
+    const db = new FakeDynamoDB();
+    const store = new DynamoStore('table', db);
+    await store.putInvitation({ tokenId: 'T'.repeat(43), inviter: alice, initials: 'AZ', expiresAt: NOW + 20 });
+    await store.acceptInvitation('T'.repeat(43), { inviter: alice, invitee: bob }, NOW);
+    expect([...db.items.keys()].filter((k) => k.includes('CONTACT#'))).toHaveLength(2);
+    db.calls.length = 0;
+    await store.removeContact(alice, bob);
+    expect(db.calls).toEqual(['TransactWriteCommand']);
+    expect([...db.items.keys()].filter((k) => k.includes('CONTACT#'))).toEqual([]);
+  });
+
+  it('keeps an accepted invitation only until DynamoDB’s TTL takes it, like any invitation', async () => {
+    const db = new FakeDynamoDB();
+    const store = new DynamoStore('table', db);
+    await store.putInvitation({ tokenId: 'T'.repeat(43), inviter: alice, initials: 'AZ', expiresAt: NOW + 20 });
+    await store.acceptInvitation('T'.repeat(43), { inviter: alice, invitee: bob }, NOW);
+    const invitation = db.items.get(`INVITATION#${'T'.repeat(43)}|INVITATION`);
+    expect(invitation).toMatchObject({ acceptedBy: bob, ttl: NOW + 20 });
+    expect(JSON.stringify(invitation)).not.toContain('BB'); // the invitee's initials: relayed, never stored
+  });
+
+  it("answers from the owner's own record — the one in its partition", async () => {
+    // Only one side in the table, as could only happen by hand: the reads must still mean
+    // "my contacts", not "who has me".
+    const db = new FakeDynamoDB();
+    const store = new DynamoStore('table', db);
+    await db.send(new PutCommand({ TableName: 'table', Item: contactItem(alice, bob) }));
+    expect(await store.isContact(alice, bob)).toBe(true);
+    expect(await store.isContact(bob, alice)).toBe(false);
+    expect(await store.listContacts(alice)).toEqual([bob]);
+    expect(await store.listContacts(bob)).toEqual([]);
+  });
+
+  it('does not mistake a contact for a connection or a message in the same partition', async () => {
+    const store = new DynamoStore('table', new FakeDynamoDB());
+    await store.putInvitation({ tokenId: 'T'.repeat(43), inviter: alice, initials: 'AZ', expiresAt: NOW + 20 });
+    await store.acceptInvitation('T'.repeat(43), { inviter: alice, invitee: bob }, NOW);
+    await store.putConnection({ connectionId: 'c1', deviceId: alice, connectedAt: NOW });
+    await store.putMessage(envelope({ from: bob, to: alice }));
+    expect((await store.listConnections(alice)).map((c) => c.connectionId)).toEqual(['c1']);
+    expect(ids(await store.listMessages(alice, NOW))).toEqual(['m1']);
+    expect(await store.listContacts(alice)).toEqual([bob]);
+  });
+});
+
+// The stand-in is only worth its tests if it fails where DynamoDB fails.
+describe('the stand-in DynamoDB client', () => {
+  const put = (Item: object, ConditionExpression?: string) =>
+    new PutCommand({ TableName: 't', Item: Item as Record<string, unknown>, ConditionExpression });
+
+  it('refuses a conditional put, as DynamoDB does', async () => {
+    const db = new FakeDynamoDB();
+    await db.send(put({ PK: 'a', SK: 'b' }));
+    await expect(db.send(put({ PK: 'a', SK: 'b', x: 1 }, 'attribute_not_exists(PK)'))).rejects.toMatchObject({
+      name: 'ConditionalCheckFailedException',
+    });
+    expect(db.items.get('a|b')).toEqual({ PK: 'a', SK: 'b' });
+  });
+
+  it('cancels a whole transaction when one condition fails, with a reason per item, writing nothing', async () => {
+    const db = new FakeDynamoDB();
+    const attempt = db.send(
+      new TransactWriteCommand({
+        TransactItems: [
+          { Put: { TableName: 't', Item: { PK: 'x', SK: '1' } } },
+          {
+            Update: {
+              TableName: 't',
+              Key: { PK: 'y', SK: '1' },
+              UpdateExpression: 'SET #v = :v',
+              ConditionExpression: 'attribute_exists(PK)',
+              ExpressionAttributeNames: { '#v': 'v' },
+              ExpressionAttributeValues: { ':v': 1 },
+            },
+          },
+        ],
+      }),
+    );
+    await expect(attempt).rejects.toMatchObject({
+      name: 'TransactionCanceledException',
+      CancellationReasons: [{ Code: 'None' }, { Code: 'ConditionalCheckFailed' }],
+    });
+    expect(db.items.size).toBe(0);
+  });
+
+  it('refuses two writes to one item in a transaction, and a reserved word used bare', async () => {
+    const db = new FakeDynamoDB();
+    const twice = new TransactWriteCommand({
+      TransactItems: [
+        { Put: { TableName: 't', Item: { PK: 'x', SK: '1' } } },
+        { Delete: { TableName: 't', Key: { PK: 'x', SK: '1' } } },
+      ],
+    });
+    await expect(db.send(twice)).rejects.toMatchObject({ name: 'ValidationException' });
+    await expect(db.send(put({ PK: 'a', SK: 'b' }, 'attribute_not_exists(owner)'))).rejects.toThrow('reserved word');
   });
 });

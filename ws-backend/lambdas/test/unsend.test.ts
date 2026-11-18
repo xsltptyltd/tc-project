@@ -14,7 +14,7 @@ const ack = (messageId: string) => JSON.stringify({ action: 'ack', messageId });
 
 /** Alice online; Bob and Carol offline. */
 async function aliceOnline() {
-  const t = testDeps();
+  const t = testDeps({ contacts: [alice, bob, carol] });
   await onConnect(t.deps, 'conn-a', alice);
   return t;
 }

@@ -4,35 +4,48 @@ import { randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { WebSocketServer, type WebSocket } from 'ws';
-import { MESSAGE_TTL_SECONDS, type ServerEvent } from 'tc-protocol';
+import { INVITATION_TTL_SECONDS, MESSAGE_TTL_SECONDS, type ServerEvent } from 'tc-protocol';
 import { MemoryStore } from '../src/adapters/memory-store';
 import { verifyAuthToken } from '../src/core/auth';
 import { onConnect, onDisconnect } from '../src/core/connections';
-import type { Deps } from '../src/core/ports';
+import type { ContactStore, Deps, Store } from '../src/core/ports';
 import { onMessage } from '../src/core/router';
 
-export interface LocalServer {
+export interface LocalServer<S = MemoryStore> {
   port: number;
   url: string;
-  store: MemoryStore;
+  store: S;
   close(): Promise<void>;
 }
 
-export interface LocalServerOptions {
+export interface LocalServerOptions<S> {
+  /**
+   * Where everything is kept: in memory by default. Tests pass the DynamoDB store, talking
+   * to a stand-in client, to run the whole system on it.
+   */
+  store?: S;
   /** How long an unacknowledged message is kept. Default: 24 hours. */
   messageTtlSeconds?: number;
-  /** How often expired messages are swept from memory. Default: every second. */
+  /** How long an invitation can be accepted. Default: 20 seconds. */
+  invitationTtlSeconds?: number;
+  /** How often expired messages and invitations are swept from memory. Default: every second. */
   sweepIntervalMs?: number;
 }
 
-export async function startLocalServer(
+export async function startLocalServer<S extends Store & ContactStore = MemoryStore>(
   port = 0,
   host = '127.0.0.1',
-  { messageTtlSeconds = MESSAGE_TTL_SECONDS, sweepIntervalMs = 1000 }: LocalServerOptions = {},
-): Promise<LocalServer> {
+  {
+    store: given,
+    messageTtlSeconds = MESSAGE_TTL_SECONDS,
+    invitationTtlSeconds = INVITATION_TTL_SECONDS,
+    sweepIntervalMs = 1000,
+  }: LocalServerOptions<S> = {},
+): Promise<LocalServer<S>> {
   const now = () => Math.floor(Date.now() / 1000);
-  const store = new MemoryStore(now);
-  const stopSweeping = store.startSweeping(sweepIntervalMs);
+  const store = given ?? (new MemoryStore(now) as Store & ContactStore as S);
+  // Memory needs sweeping; DynamoDB has its TTL (D8).
+  const stopSweeping = store instanceof MemoryStore ? store.startSweeping(sweepIntervalMs) : () => {};
   const sockets = new Map<string, WebSocket>();
 
   const deps: Deps = {
@@ -40,6 +53,8 @@ export async function startLocalServer(
     now,
     newId: randomUUID,
     messageTtlSeconds,
+    contacts: store,
+    invitationTtlSeconds,
     transport: {
       async post(connectionId: string, event: ServerEvent): Promise<boolean> {
         const socket = sockets.get(connectionId);

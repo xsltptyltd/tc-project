@@ -10,3 +10,8 @@ no `Buffer`, no browser globals.
 
 Call `await init()` once before anything else. On React Native pass a random source:
 `init({ randomBytes })`.
+
+`src/invitation.ts` holds the invitation secret, the invitation key (the secret bound to
+a proximity value), its token id and the invitee's MAC (D18). The key and the MAC are
+libsodium's `crypto_auth` (HMAC-SHA-512-256), written on TweetNaCl's SHA-512; the
+libsodium test checks all three.

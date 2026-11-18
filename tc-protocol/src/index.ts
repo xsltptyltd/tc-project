@@ -10,12 +10,36 @@ export const AUTH_MAX_SKEW_SECONDS = 60;
 export const MAX_CIPHERTEXT_LENGTH = 16 * 1024;
 /** A person is known to the backend only by their initials: 1 to 4 letters. */
 export const INITIALS_MAX_LENGTH = 4;
+/**
+ * How long an invitation code can be accepted, by default. A backend setting
+ * (`Deps.invitationTtlSeconds`); local runs may change it, within the maximum below.
+ */
+export const INVITATION_TTL_SECONDS = 20;
+/** An invitation is a bearer secret: it must stay short-lived, whatever the setting. */
+export const INVITATION_TTL_MAX_SECONDS = 300;
 
 const base64url = /^[A-Za-z0-9_-]+$/;
 
 /** A device's identity: its Ed25519 public key, 32 bytes, base64url without padding. */
 export const DeviceIdSchema = z.string().regex(/^[A-Za-z0-9_-]{43}$/);
 export type DeviceId = z.infer<typeof DeviceIdSchema>;
+
+/**
+ * Initials: 1 to 4 letters A–Z, upper case. Letters only, so that a label such as `PC2`
+ * (D13) always reads as initials followed by a number; A–Z only, so that two labels that
+ * look the same are the same. Clients upper-case what the person typed.
+ */
+export const InitialsSchema = z.string().regex(new RegExp(`^[A-Z]{1,${INITIALS_MAX_LENGTH}}$`));
+export type Initials = z.infer<typeof InitialsSchema>;
+
+/**
+ * Names an invitation on the backend: a hash of the invitation's key, 32 bytes,
+ * base64url. The backend never sees the key, the secret in the code, or the proximity
+ * value the key is bound to (D1, D18).
+ */
+export const InvitationTokenIdSchema = z.string().regex(/^[A-Za-z0-9_-]{43}$/);
+/** The invitee's proof that it holds the invitation's secret: 32 bytes, base64url. */
+export const InvitationMacSchema = z.string().regex(/^[A-Za-z0-9_-]{43}$/);
 
 export const CiphertextSchema = z.string().min(1).max(MAX_CIPHERTEXT_LENGTH).regex(base64url);
 
@@ -41,6 +65,10 @@ export type Payload = z.infer<typeof PayloadSchema>;
 
 /** Client → server frames. `action` is also the API Gateway route selection key. */
 export const ClientActionSchema = z.discriminatedUnion('action', [
+  /**
+   * "Deliver this to `to`." Only to a contact: anyone else is refused with
+   * `not_a_contact`, and nothing is stored (D19).
+   */
   z.object({ action: z.literal('send'), to: DeviceIdSchema, ciphertext: CiphertextSchema }),
   /**
    * "I have this message; delete it." Only the receiver can delete a message. There is no
@@ -66,10 +94,47 @@ export const ClientActionSchema = z.discriminatedUnion('action', [
     to: DeviceIdSchema,
     messageId: z.string().min(1).max(64).optional(),
   }),
+  /**
+   * "I am showing an invitation; hold it for a short while." The inviter is taken from the
+   * connection. The backend answers `invited` with how long the invitation lasts (D18).
+   */
+  z.object({ action: z.literal('invite'), tokenId: InvitationTokenIdSchema, initials: InitialsSchema }),
+  /**
+   * "I accept `inviter`'s invitation `tokenId`." The invitee is taken from the connection.
+   * `mac` proves to the inviter that the invitee held the key — the code and the
+   * proximity value — and that the backend did not change the invitee or its initials.
+   * The backend makes the two contacts and answers `accepted`, or answers
+   * `invitation_invalid` whatever the reason (D18).
+   */
+  z.object({
+    action: z.literal('accept'),
+    tokenId: InvitationTokenIdSchema,
+    inviter: DeviceIdSchema,
+    initials: InitialsSchema,
+    mac: InvitationMacSchema,
+  }),
+  /**
+   * "`contact` and I are no longer contacts." For both of us, at once: the backend deletes
+   * the two records and every message still waiting between us, answers `removed`, and
+   * tells both our devices (`contact_removed`). The same answer whether or not we were
+   * contacts (D5).
+   */
+  z.object({ action: z.literal('remove'), contact: DeviceIdSchema }),
+  /**
+   * "Who are my contacts, as far as you know?" Answered with `contacts`. A device uses the
+   * answer only to drop contacts the backend no longer has — never to add one (D20).
+   */
+  z.object({ action: z.literal('contacts') }),
 ]);
 export type ClientAction = z.infer<typeof ClientActionSchema>;
 
-export type ErrorCode = 'bad_request' | 'unknown_connection';
+/**
+ * `invitation_invalid`: unknown (which includes a code accepted from somewhere else than
+ * beside the inviter), expired, already accepted, or not that inviter's. Which of these
+ * is never said.
+ * `not_a_contact`: a message to someone who is not a contact of the sender (D19).
+ */
+export type ErrorCode = 'bad_request' | 'unknown_connection' | 'invitation_invalid' | 'not_a_contact';
 
 /**
  * Server → client frames.
@@ -80,6 +145,28 @@ export type ErrorCode = 'bad_request' | 'unknown_connection';
 export type ServerEvent =
   | { type: 'message'; envelope: Envelope }
   | { type: 'sent'; messageId: string }
+  /** Answer to `invite`: the invitation can be accepted for `expiresIn` seconds from now. */
+  | { type: 'invited'; tokenId: string; expiresIn: number }
+  /**
+   * Answer to `accept`: the invitation was yours, and you and the inviter are now
+   * contacts; here are the inviter's initials.
+   */
+  | { type: 'accepted'; inviter: DeviceId; initials: Initials }
+  /**
+   * To the inviter's connections: someone accepted invitation `tokenId`, and is now a
+   * contact. The inviter checks `mac` with the invitation's key before believing any of it.
+   */
+  | { type: 'invitee'; tokenId: string; invitee: DeviceId; initials: Initials; mac: string }
+  /** Answer to `remove`: you and `contact` are not contacts (any more). */
+  | { type: 'removed'; contact: DeviceId }
+  /**
+   * To every connection of both sides of a removed contact: `contact` is no longer one of
+   * yours. Sent to the one removed too — their device must drop it — but never shown to
+   * them as news (D5).
+   */
+  | { type: 'contact_removed'; contact: DeviceId }
+  /** Answer to `contacts`: the device ids the backend has as this device's contacts. */
+  | { type: 'contacts'; contacts: DeviceId[] }
   | { type: 'error'; code: ErrorCode };
 
 // ---- authentication -------------------------------------------------------

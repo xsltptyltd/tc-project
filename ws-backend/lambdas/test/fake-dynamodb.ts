@@ -5,17 +5,31 @@
 //
 // It keeps the DynamoDB behaviours that matter for correctness:
 //   - a query returns pages, and the filter is applied after the page is cut;
-//   - a failed condition throws ConditionalCheckFailedException;
+//   - a failed condition throws ConditionalCheckFailedException — on a put, an update or
+//     a delete;
 //   - reserved words are refused unless written as #names;
-//   - a transaction writes everything or nothing.
+//   - a transaction writes everything or nothing: if any condition fails, it throws
+//     TransactionCanceledException with one reason per item, as DynamoDB does, and
+//     writes nothing; it refuses two writes to the same item, as DynamoDB does.
 type Item = Record<string, unknown>;
 type Values = Record<string, unknown> | undefined;
 type Names = Record<string, string> | undefined;
 
-const RESERVED = new Set(['from', 'to', 'ttl', 'name', 'status', 'key', 'value', 'type', 'data', 'timestamp']);
+// Some of DynamoDB's reserved words — the ones this table's attributes come close to.
+const RESERVED = new Set([
+  'from', 'to', 'ttl', 'name', 'status', 'key', 'value', 'type', 'data', 'timestamp',
+  'owner', 'connection', 'user', 'date', 'time', 'count', 'size',
+]);
 
 class ConditionalCheckFailed extends Error {
   override name = 'ConditionalCheckFailedException';
+}
+
+class TransactionCanceled extends Error {
+  override name = 'TransactionCanceledException';
+  constructor(readonly CancellationReasons: Array<{ Code: string }>) {
+    super(`Transaction cancelled, please refer cancellation reasons for specific reasons [${CancellationReasons.map((r) => r.Code).join(', ')}]`);
+  }
 }
 
 function operand(token: string, item: Item | undefined, names: Names, values: Values): unknown {
@@ -43,11 +57,15 @@ function matches(expression: string | undefined, item: Item | undefined, names: 
   if (!expression) return true;
   return expression.split(/\s+AND\s+/).every((clause) => {
     let m: RegExpMatchArray | null;
+    // Names are resolved before looking at the item: DynamoDB refuses a bad expression
+    // whether or not the item exists.
     if ((m = clause.match(/^attribute_exists\(([#\w]+)\)$/))) {
-      return item !== undefined && attribute(m[1]!, names) in item;
+      const name = attribute(m[1]!, names);
+      return item !== undefined && name in item;
     }
     if ((m = clause.match(/^attribute_not_exists\(([#\w]+)\)$/))) {
-      return item === undefined || !(attribute(m[1]!, names) in item);
+      const name = attribute(m[1]!, names);
+      return item === undefined || !(name in item);
     }
     if ((m = clause.match(/^begins_with\(([#\w]+),\s*(:\w+)\)$/))) {
       const value = operand(m[1]!, item, names, values);
@@ -77,6 +95,7 @@ export class FakeDynamoDB {
     this.calls.push(command.constructor.name);
     switch (command.constructor.name) {
       case 'PutCommand':
+        this.check({ ...input, Key: input.Item });
         this.items.set(keyOf(input.Item), { ...input.Item });
         return {};
       case 'GetCommand': {
@@ -87,22 +106,37 @@ export class FakeDynamoDB {
         this.check(input);
         this.items.delete(keyOf(input.Key));
         return {};
-      case 'UpdateCommand': {
+      case 'UpdateCommand':
         this.check(input);
-        const set = String(input.UpdateExpression).match(/^SET (\w+) = (:\w+)$/);
-        if (!set) throw new Error(`fake DynamoDB: cannot evaluate "${input.UpdateExpression}"`);
-        const existing = this.items.get(keyOf(input.Key)) ?? { ...input.Key };
-        const name = attribute(set[1]!, input.ExpressionAttributeNames);
-        this.items.set(keyOf(input.Key), { ...existing, [name]: input.ExpressionAttributeValues[set[2]!] });
+        this.update(input);
         return {};
-      }
       case 'TransactWriteCommand': {
-        const writes = input.TransactItems.map((t: any) => t.Put ?? t.Delete);
-        for (const write of writes) if (write.Key) this.check(write); // all checked first
-        for (const t of input.TransactItems) {
-          if (t.Put) this.items.set(keyOf(t.Put.Item), { ...t.Put.Item });
-          else if (t.Delete) this.items.delete(keyOf(t.Delete.Key));
-          else throw new Error('fake DynamoDB: unsupported transaction item');
+        const writes: Array<{ kind: string; input: any; key: Item }> = input.TransactItems.map((t: any) => {
+          const [kind, write] = Object.entries(t)[0] as [string, any];
+          if (!['Put', 'Update', 'Delete'].includes(kind)) throw new Error(`fake DynamoDB: unsupported transaction item ${kind}`);
+          return { kind, input: write, key: kind === 'Put' ? write.Item : write.Key };
+        });
+        const keys = writes.map((w) => keyOf(w.key));
+        if (new Set(keys).size !== keys.length) {
+          throw Object.assign(new Error('Transaction request cannot include multiple operations on one item'), {
+            name: 'ValidationException',
+          });
+        }
+        // Every condition is checked before anything is written; one failure cancels all.
+        const reasons = writes.map((w) => {
+          try {
+            this.check({ ...w.input, Key: w.key });
+            return { Code: 'None' };
+          } catch (error) {
+            if (error instanceof ConditionalCheckFailed) return { Code: 'ConditionalCheckFailed' };
+            throw error;
+          }
+        });
+        if (reasons.some((r) => r.Code !== 'None')) throw new TransactionCanceled(reasons);
+        for (const w of writes) {
+          if (w.kind === 'Put') this.items.set(keyOf(w.key), { ...w.input.Item });
+          else if (w.kind === 'Update') this.update(w.input);
+          else this.items.delete(keyOf(w.key));
         }
         return {};
       }
@@ -111,6 +145,22 @@ export class FakeDynamoDB {
       default:
         throw new Error(`fake DynamoDB: unsupported command ${command.constructor.name}`);
     }
+  }
+
+  /** `SET a = :x` or `SET #a = :x, #b = :y`: all this store writes. */
+  private update(input: any): void {
+    const expression = String(input.UpdateExpression);
+    const body = expression.match(/^SET (.+)$/)?.[1];
+    if (!body) throw new Error(`fake DynamoDB: cannot evaluate "${expression}"`);
+    const existing = this.items.get(keyOf(input.Key)) ?? { ...input.Key };
+    for (const assignment of body.split(/,\s*/)) {
+      const set = assignment.match(/^([#\w]+) = (:\w+)$/);
+      if (!set) throw new Error(`fake DynamoDB: cannot evaluate "${expression}"`);
+      const name = attribute(set[1]!, input.ExpressionAttributeNames);
+      if (!(set[2]! in (input.ExpressionAttributeValues ?? {}))) throw new Error(`fake DynamoDB: no value for ${set[2]}`);
+      existing[name] = input.ExpressionAttributeValues[set[2]!];
+    }
+    this.items.set(keyOf(input.Key), existing);
   }
 
   private check(input: any): void {

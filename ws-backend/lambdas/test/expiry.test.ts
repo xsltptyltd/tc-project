@@ -21,7 +21,7 @@ afterEach(() => {
 
 /** Alice, online, with a one-second message lifetime. */
 async function oneSecondTtl() {
-  const t = testDeps({ now: T, messageTtlSeconds: 1 });
+  const t = testDeps({ now: T, messageTtlSeconds: 1, contacts: [alice, bob, carol] });
   await onConnect(t.deps, 'conn-a', alice);
   return t;
 }

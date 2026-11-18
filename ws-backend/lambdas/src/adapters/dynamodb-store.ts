@@ -5,6 +5,10 @@
 //   connection, by device   PK DEVICE#<deviceId>           SK CONNECTION#<connectionId>
 //   message                 PK DEVICE#<to>                 SK MSG#<id>
 //                           + `delivered: true` once handed to the receiver (D17)
+//   contact                 PK DEVICE#<owner>              SK CONTACT#<other>
+//                           one per side, written and deleted in pairs (D5)
+//   invitation              PK INVITATION#<tokenId>        SK INVITATION
+//                           + `acceptedBy` once accepted; `ttl` = its expiry (D18)
 //
 // Tested without AWS: the item shaping directly, and the whole class through an
 // in-memory stand-in for the DynamoDB client (test/fake-dynamodb.ts), with the same
@@ -21,7 +25,7 @@ import {
   type QueryCommandInput,
 } from '@aws-sdk/lib-dynamodb';
 import type { DeviceId, Envelope } from 'tc-protocol';
-import type { Connection, Store } from '../core/ports';
+import type { Connection, ContactStore, InvitationRecord, Store } from '../core/ports';
 
 const DEVICE = (deviceId: DeviceId) => `DEVICE#${deviceId}`;
 const CONNECTION = (connectionId: string) => `CONNECTION#${connectionId}`;
@@ -99,10 +103,41 @@ export function envelopesOldestFirst(items: Record<string, unknown>[]): Envelope
   return items.map(envelopeFrom).sort((a, b) => a.sentAt - b.sentAt);
 }
 
+/**
+ * One side of a contact, in the owner's partition: "every contact this device has" is one
+ * query there, and "is X a contact of mine" one read.
+ */
+export function contactKey(owner: DeviceId, other: DeviceId) {
+  return { PK: DEVICE(owner), SK: `CONTACT#${other}` };
+}
+
+/** A contact is two of these, one per side (D5). Nothing else: names live on devices (D13). */
+export function contactItem(owner: DeviceId, other: DeviceId) {
+  return { ...contactKey(owner, other), owner, contact: other };
+}
+
+export function invitationKey(tokenId: string) {
+  return { PK: `INVITATION#${tokenId}`, SK: 'INVITATION' };
+}
+
+export function invitationItem(invitation: InvitationRecord) {
+  return {
+    ...invitationKey(invitation.tokenId),
+    ...invitation,
+    // DynamoDB deletes it some time after it expires; accepting checks expiry itself (D8).
+    ttl: invitation.expiresAt,
+  };
+}
+
+export function invitationFrom(item: Record<string, unknown>): InvitationRecord {
+  const { tokenId, inviter, initials, expiresAt, acceptedBy } = item as ReturnType<typeof invitationItem>;
+  return { tokenId, inviter, initials, expiresAt, ...(acceptedBy !== undefined && { acceptedBy }) };
+}
+
 /** The part of the DynamoDB document client the store uses; tests pass a stand-in. */
 export type DocumentClient = Pick<DynamoDBDocumentClient, 'send'>;
 
-export class DynamoStore implements Store {
+export class DynamoStore implements Store, ContactStore {
   constructor(
     private readonly table: string,
     private readonly db: DocumentClient = DynamoDBDocumentClient.from(new DynamoDBClient({})),
@@ -237,6 +272,130 @@ export class DynamoStore implements Store {
     }
   }
 
+  async deleteMessagesBetween(a: DeviceId, b: DeviceId): Promise<void> {
+    // Messages sit in their receiver's partition (D16): one query per direction, in
+    // partitions the backend knows, then one delete per message. Delivered or not.
+    for (const [from, to] of [[a, b], [b, a]] as const) {
+      const items = await this.queryAll({
+        TableName: this.table,
+        KeyConditionExpression: 'PK = :device AND begins_with(SK, :message)',
+        FilterExpression: '#from = :from',
+        ExpressionAttributeNames: { '#from': 'from' }, // FROM is a reserved word
+        ExpressionAttributeValues: { ':device': DEVICE(to), ':message': 'MSG#', ':from': from },
+        ProjectionExpression: 'id',
+        ConsistentRead: true,
+      });
+      for (const item of items) {
+        // Gone already (acknowledged, expired) is fine: deleting a missing key is a no-op.
+        await this.db.send(new DeleteCommand({ TableName: this.table, Key: messageKey(to, item.id as string) }));
+      }
+    }
+  }
+
+  async putInvitation(invitation: InvitationRecord): Promise<boolean> {
+    try {
+      await this.db.send(
+        new PutCommand({
+          TableName: this.table,
+          Item: invitationItem(invitation),
+          // Never over another invitation with the same token id.
+          ConditionExpression: 'attribute_not_exists(PK)',
+        }),
+      );
+      return true;
+    } catch (error) {
+      if (conditionFailed(error)) return false;
+      throw error;
+    }
+  }
+
+  async acceptInvitation(
+    tokenId: string,
+    { inviter, invitee }: { inviter: DeviceId; invitee: DeviceId },
+    now: number,
+  ): Promise<InvitationRecord | undefined> {
+    // Read first, for the initials to answer with — and to refuse most bad attempts
+    // without a transaction. The transaction below checks everything again.
+    const { Item } = await this.db.send(
+      new GetCommand({ TableName: this.table, Key: invitationKey(tokenId), ConsistentRead: true }),
+    );
+    if (!Item) return undefined;
+    const invitation = invitationFrom(Item);
+    if (invitation.inviter !== inviter || invitation.expiresAt <= now || invitation.acceptedBy !== undefined) {
+      return undefined;
+    }
+    try {
+      // One step, all or nothing: the invitation is taken — only if it is still open,
+      // theirs and unexpired at this very moment — and both sides of the contact are
+      // written. Two devices racing for it cannot both get it. Writing a contact that
+      // already exists writes the same thing again: nothing changes (D5).
+      await this.db.send(
+        new TransactWriteCommand({
+          TransactItems: [
+            {
+              Update: {
+                TableName: this.table,
+                Key: invitationKey(tokenId),
+                UpdateExpression: 'SET #acceptedBy = :invitee',
+                ConditionExpression:
+                  'attribute_exists(PK) AND #inviter = :inviter AND #expiresAt > :now AND attribute_not_exists(#acceptedBy)',
+                ExpressionAttributeNames: { '#acceptedBy': 'acceptedBy', '#inviter': 'inviter', '#expiresAt': 'expiresAt' },
+                ExpressionAttributeValues: { ':invitee': invitee, ':inviter': inviter, ':now': now },
+              },
+            },
+            { Put: { TableName: this.table, Item: contactItem(inviter, invitee) } },
+            { Put: { TableName: this.table, Item: contactItem(invitee, inviter) } },
+          ],
+        }),
+      );
+    } catch (error) {
+      // Taken, expired or gone since the read: refused, like any other reason. Anything
+      // else — a conflict with another transaction on it at that instant, say — is
+      // thrown: nothing was written, so the invitation is still there to accept.
+      if (transactionConditionFailed(error)) return undefined;
+      throw error;
+    }
+    return { ...invitation, acceptedBy: invitee };
+  }
+
+  async isContact(owner: DeviceId, other: DeviceId): Promise<boolean> {
+    const { Item } = await this.db.send(
+      new GetCommand({
+        TableName: this.table,
+        Key: contactKey(owner, other),
+        // A message sent a moment after the invitation was accepted must be allowed.
+        ConsistentRead: true,
+      }),
+    );
+    return Item !== undefined;
+  }
+
+  async listContacts(owner: DeviceId): Promise<DeviceId[]> {
+    const items = await this.queryAll({
+      TableName: this.table,
+      KeyConditionExpression: 'PK = :device AND begins_with(SK, :contact)',
+      ExpressionAttributeValues: { ':device': DEVICE(owner), ':contact': 'CONTACT#' },
+      ProjectionExpression: '#contact',
+      ExpressionAttributeNames: { '#contact': 'contact' },
+      // A device syncing right after a removal must not see the removed contact (D21).
+      ConsistentRead: true,
+    });
+    return items.map((item) => item.contact as DeviceId);
+  }
+
+  async removeContact(a: DeviceId, b: DeviceId): Promise<void> {
+    // Both sides or neither (D5). Deleting what is not there is not an error, so removing
+    // twice, or two who never were contacts, changes nothing.
+    await this.db.send(
+      new TransactWriteCommand({
+        TransactItems: [
+          { Delete: { TableName: this.table, Key: contactKey(a, b) } },
+          { Delete: { TableName: this.table, Key: contactKey(b, a) } },
+        ],
+      }),
+    );
+  }
+
   /** A query answers at most 1 MB per page; a day of waiting messages can be more. */
   private async queryAll(
     input: Omit<QueryCommandInput, 'ExclusiveStartKey'>,
@@ -254,3 +413,11 @@ export class DynamoStore implements Store {
 
 const conditionFailed = (error: unknown) =>
   error instanceof Error && error.name === 'ConditionalCheckFailedException';
+
+/** A transaction cancelled because one of its conditions did not hold. */
+const transactionConditionFailed = (error: unknown) =>
+  error instanceof Error &&
+  error.name === 'TransactionCanceledException' &&
+  ((error as { CancellationReasons?: Array<{ Code?: string }> }).CancellationReasons ?? []).some(
+    (reason) => reason.Code === 'ConditionalCheckFailed',
+  );

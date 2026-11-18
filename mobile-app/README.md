@@ -42,6 +42,13 @@ npm run app -- --android           # builds the app and opens it on the emulator
 - **Real phone:** start the server with `HOST=0.0.0.0 npm run dev:server`, and in the app
   set the server to `ws://<this computer's address on the wifi>:8787`.
 
+**It cannot send anything for now.** Only contacts can write to each other
+(`design/DECISIONS.md` D19), and people become contacts through an invitation accepted
+side by side (D18), which the app has no screen for yet (QR code, Bluetooth). Every
+message it sends shows `not sent: not one of your contacts`, and it shows no message
+from anyone: it keeps no contact book yet (D20). The steps below are
+what worked before, and will again once the app can invite and accept.
+
 To talk to it, use the command-line client (`cli/README.md`):
 
 ```

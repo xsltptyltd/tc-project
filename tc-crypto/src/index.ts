@@ -97,3 +97,14 @@ export function decryptFrom(receiver: Identity, from: DeviceId, ciphertext: stri
   if (!plain) throw new Error('message could not be decrypted');
   return PayloadSchema.parse(JSON.parse(utf8Decode(plain)));
 }
+
+export {
+  INVITATION_SECRET_BYTES,
+  invitationKey,
+  invitationMac,
+  invitationMacString,
+  invitationTokenId,
+  isInvitationSecret,
+  newInvitationSecret,
+  verifyInvitationMac,
+} from './invitation';

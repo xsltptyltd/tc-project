@@ -7,7 +7,7 @@ import {
   GoneException,
   PostToConnectionCommand,
 } from '@aws-sdk/client-apigatewaymanagementapi';
-import { MESSAGE_TTL_SECONDS } from 'tc-protocol';
+import { INVITATION_TTL_SECONDS, MESSAGE_TTL_SECONDS } from 'tc-protocol';
 import type { Deps, Transport } from '../core/ports';
 import { DynamoStore } from './dynamodb-store';
 
@@ -51,5 +51,8 @@ export function awsDeps(requestContext: { domainName: string; stage: string }): 
     now: () => Math.floor(Date.now() / 1000),
     newId: randomUUID,
     messageTtlSeconds: MESSAGE_TTL_SECONDS,
+    // Invitations and contacts live in the same table (D16).
+    contacts: store,
+    invitationTtlSeconds: INVITATION_TTL_SECONDS,
   };
 }
