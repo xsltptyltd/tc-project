@@ -14,7 +14,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "dev:server": "tsx ws-backend/lambdas/local/main.ts",
     "cli": "tsx cli/src/main.ts",
-    "app": "npm --prefix mobile-app run start",
+    "app": "npm --prefix mobile-app run start --",
     "simulation": "tsx cli/src/simulation.ts"
   },
   "engines": {

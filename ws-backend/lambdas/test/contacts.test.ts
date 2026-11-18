@@ -165,6 +165,14 @@ describe('removing a contact', () => {
     ]);
   });
 
+  it('does nothing, and tells nobody, when the two were never contacts', async () => {
+    const t = await strangers();
+    await onMessage(t.deps, 'conn-c', remove(alice));
+    expect(t.eventsFor('conn-c')).toEqual([{ type: 'removed', contact: alice }]);
+    // A stranger cannot make the backend write to a device it never met.
+    expect(t.eventsFor('conn-a')).toEqual([]);
+  });
+
   it("takes the one removing from the connection: nobody can end someone else's contact", async () => {
     const t = await aliceBobAndCarol();
     // carol names bob; the backend reads it as "carol removes bob" — alice and bob stay.

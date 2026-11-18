@@ -11,6 +11,13 @@ export async function removeContact(
   contact: DeviceId,
 ): Promise<void> {
   // The one removing is taken from the connection: nobody ends someone else's contacts.
+  // Between two who are not contacts there is nothing to end, and nobody to tell: a
+  // stranger cannot make the backend write to, or work for, a device it never met. The
+  // answer is the same.
+  if (!(await deps.contacts.isContact(owner, contact))) {
+    await deps.transport.post(connectionId, { type: 'removed', contact });
+    return;
+  }
   // Contact first, so nothing new can be sent between them while the messages go.
   await deps.contacts.removeContact(owner, contact);
   await deps.store.deleteMessagesBetween(owner, contact);

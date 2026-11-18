@@ -388,7 +388,11 @@ and never sent anywhere — not to the backend, not in the code.
   with a message saying so. A stand-in only: anyone who knows the room name counts as
   nearby, and room names are easy to guess — someone holding a code could try a few
   within its 20 seconds. Good enough to develop with; nothing limits how often they try.
-- **Phone (not built): Bluetooth.** The inviter advertises a random value, rotating with
+- **Phone, for now: a room too.** The app has a room field, `1` by default, so two phones
+  — or a phone and a terminal with `TC_ROOM=1` — can add each other without touching it
+  (`mobile-app/src/room.ts`). The same stand-in, with the same weakness. The code is
+  shown and entered as text; the QR code is not built.
+- **Phone, later (not built): Bluetooth.** The inviter advertises a random value, rotating with
   its QR code; the invitee scans for it, ignoring weak signals (D1). Random values
   cannot be guessed, which closes the gap rooms leave.
 - **Unavailable means nothing is sent.** If the inviter cannot announce, no invitation is
@@ -421,7 +425,8 @@ Details:
   A's device does not add that key to its contact book (D20) and tells A; the invitation
   stays open until it expires. The backend has made the contact on its side regardless,
   which gives it nothing: A's device will neither encrypt to that key nor show what comes
-  from it. Refusing it on the backend too is the confirmation step (D5), not built.
+  from it, and ends that contact on the backend at its next sync (D21). Refusing it on
+  the backend in the first place is the confirmation step (D5), not built.
 - **What is swappable.** On the backend, invitations and contacts sit behind their own
   port, `ContactStore` (`ws-backend/lambdas/src/core/ports.ts`): in memory, or on
   DynamoDB (D16). On the device, two seams in `tc-client`: how the code travels,
@@ -481,11 +486,11 @@ which would then read every message and pass it on.
   given when the contact is added; the alias, later, by the owner (D13).
 - **Where the book is kept** sits behind one interface, `ContactBook` (`tc-client`): the
   profile file in the terminal (`.tc/<name>.json`, with the keys — development only), the
-  platform's secure storage on the phone (not built), in memory in tests. Like
+  platform's secure storage on the phone (`mobile-app/src/contact-book.ts`), in memory
+  in tests. Like
   aliases (D13), it never leaves the device.
 - **Removing a contact** takes it out of both devices' books (D21). The backend can make
   a device drop a contact, never add one.
-- **Not built yet:** the phone's book.
 - **Trying it with many people:** `npm run simulation` has twenty profiles meet at random
   through the real exchange, so lists have numbered labels and aliases (`cli/README.md`).
 
@@ -503,6 +508,14 @@ Either person can end a contact, for both (D5). Since each device keeps its own 
 3. **Devices that were offline catch up when they connect:** a device asks the backend
    for its contacts (`contacts`) and drops any the backend no longer has. The CLI does it
    after every connection, `cli contacts` included; the app will when opened.
+4. **The same sync ends half a contact.** A contact the backend has and the device does
+   not — the inviter's connection dropped before it was told of the acceptance, or its
+   MAC did not match (D18) — is one the device never checked. It asks the backend to
+   remove it, which also deletes what was waiting and drops it from the other device's
+   list. So the two lists and the backend end up agreeing: both, or neither. Not while
+   an invitation of this device is open or being accepted, when the backend may simply
+   know first. The confirmation step of D5 would prevent the half contact instead of
+   repairing it; it is still not built.
 
 - **Nothing is kept for the other side.** No notice waits on the backend for an offline
   device: it learns from the backend's list, which simply no longer has the contact
@@ -514,6 +527,17 @@ Either person can end a contact, for both (D5). Since each device keeps its own 
   list, can make a device drop a contact; nothing the backend says can make it add one
   (D20). So a dishonest backend can end contacts — it could refuse to deliver anyway —
   but still cannot put its own key into a list.
+- **One answer cannot empty a list.** If the backend's list has none of the device's
+  contacts, and the device has more than one, the device drops nothing and says so
+  (`syncContacts()` resolves `refused`; the CLI prints a warning). The keys in a list can
+  only be had again by meeting, so a backend that has lost its data — a restart, a new or
+  wrong table, a bug — must not be able to delete them all at once. The cost: someone
+  whose every contact removed them while they were offline keeps those names until they
+  try to write, and is refused. A single contact, or some among several, is still
+  dropped as above.
+- **Removing someone who is not a contact does nothing.** The answer is the same
+  `removed`, but nothing is deleted and nobody is told: a device cannot make the backend
+  write to one it never met.
 - **A contact being added while a list is on its way is kept.** The backend's list may
   have been read just before an invitation was accepted; the device does not drop a
   contact it added after asking.
@@ -524,5 +548,7 @@ Either person can end a contact, for both (D5). Since each device keeps its own 
   stored. Its receiver's device does not show it (D20) and does not acknowledge it, so it
   expires after 24 hours.
 - **The dev server keeps contacts in memory** (even with `TC_STORE=dynamodb`, whose
-  stand-in table is in memory too). Restart it, and every device drops all its contacts
-  the next time it connects: the backend no longer has them. On AWS the table keeps them.
+  stand-in table is in memory too). Restart it, and the backend no longer has them: a
+  device with one contact drops it the next time it connects, one with several keeps its
+  list (above) but is refused when it writes, until the two meet again. On AWS the table
+  keeps them.

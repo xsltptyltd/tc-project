@@ -13,6 +13,7 @@ import {
   TcClient,
   textInvitationCodec,
   type Contact,
+  type SyncOutcome,
 } from 'tc-client';
 import { DELETE_COMMAND, parseLine } from './commands';
 import { contactLines } from './listing';
@@ -82,8 +83,15 @@ function clientFor(name: string, profile: Profile): TcClient {
 async function connected(name: string, profile: Profile): Promise<TcClient> {
   const client = clientFor(name, profile);
   await client.connect();
-  await client.syncContacts();
+  warnIfRefused(await client.syncContacts());
   return client;
+}
+
+/** A sync that would have emptied the list is not followed: say so (D21). */
+function warnIfRefused(outcome: SyncOutcome): void {
+  if (outcome !== 'refused') return;
+  console.error('warning: the server knows none of your contacts. Your list was left as it is;');
+  console.error('  if the server was restarted or replaced, meet again to write to them.');
 }
 
 async function main(): Promise<void> {
@@ -233,7 +241,7 @@ async function main(): Promise<void> {
       if (!quitting) fail('connection closed');
     });
     await client.connect();
-    await client.syncContacts();
+    warnIfRefused(await client.syncContacts());
     const contact = await profiles.contactBook(name).get(to.data);
     console.log(`you are    ${identity.initials ?? '?'}  ${identity.deviceId}`);
     if (contact) console.log(`writing to ${contact.alias ?? contact.label}  ${to.data}`);

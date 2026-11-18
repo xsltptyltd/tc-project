@@ -28,6 +28,10 @@ In rough order. Each line is a goal, not a specification.
 
 ## 2. App
 
+Done: contacts list, add someone with a text code (a room field stands in for
+Bluetooth), one conversation per contact, alias, take back, remove; the contact book in
+secure storage (D20).
+
 - Single-thread screen
 - Composer with receiver picker
 - Screen protection and inactivity lock

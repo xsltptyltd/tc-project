@@ -3,5 +3,9 @@
   "compilerOptions": {
     "strict": true,
     "preserveSymlinks": true
-  }
+  },
+  "exclude": [
+    "node_modules",
+    "test"
+  ]
 }

@@ -143,9 +143,10 @@ npm run cli -- chat grace --to Coach
 - **The same network again:** it prints its seed; `npm run simulation -- --seed 42`.
 - **Run again**, it replaces its own twenty profiles. It will not replace a profile it did
   not make — your own `alice`, say — unless told: `npm run simulation -- --replace`.
-- **The contacts are on the server too**, in memory: restart the server and each
-  person's list empties the next time they connect — `cli contacts` included — since the
-  server no longer has their contacts. Run the simulation again.
+- **The contacts are on the server too**, in memory: restart the server and it no
+  longer has them. Each person keeps their list — a device does not empty a list of
+  several on one answer (D21), and prints a warning instead — but nothing can be sent
+  until they meet again. Run the simulation again.
 - **On the DynamoDB store:** start the server with `TC_STORE=dynamodb npm run dev:server`
   and everything goes through the code the Lambdas use — with an in-memory stand-in for
   DynamoDB, not AWS.

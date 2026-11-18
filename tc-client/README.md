@@ -32,6 +32,12 @@ Incoming messages carry that name: `IncomingMessage.name`.
 told — at once if connected, otherwise at `syncContacts()`, which apps call after
 connecting. `onContactRemoved` reports drops, for refreshing a screen, not for telling the
 person. The backend can make this device drop a contact; it can never make it add one.
+`syncContacts()` also ends, on the backend, a contact this device never checked, so
+nobody is left with half a contact; and it resolves `refused`, dropping nothing, if the
+backend knows none of several contacts — one answer cannot empty a list (D21).
+
+A request rejects with `no answer from the server` after `REQUEST_TIMEOUT_MS` (15 s).
+Answers are matched to requests by kind, not by the order sent.
 
 Invitations make contacts (D18): `invite(initials, proximity)` registers a new one and
 returns what to show; `onInvitee` reports, once, whoever accepted it — after checking their

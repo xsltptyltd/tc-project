@@ -12,8 +12,8 @@
 //
 // The random choices come from a seed, printed at the start: `-- --seed <n>` makes the
 // same network again. The server needs to be running (npm run dev:server), and keeps the
-// contacts in memory: restart it, and each list empties the next time its owner connects
-// (D21) — the server no longer has those contacts.
+// contacts in memory: restart it, and it no longer has them — the lists stay (D21), but
+// nothing can be sent until this is run again.
 import { join } from 'node:path';
 import { generateIdentity, init } from 'tc-crypto';
 import { AliasRefused, ContactList, ServerError, TcClient, textInvitationCodec, type Contact } from 'tc-client';
@@ -44,7 +44,7 @@ const PEOPLE: Person[] = [
   { name: 'jane', initials: 'JS' }, // Jane Smith
   { name: 'john', initials: 'JS' }, // John Smith
   { name: 'jack', initials: 'JS' }, // Jack Stone
-  { name: 'jean', initials: 'JPS' }, // Jean-Paul Sartre
+  { name: 'jean', initials: 'JPS' }, // Jean-Pierre Stone
   { name: 'lucy', initials: 'LK' }, // Lucy King
   { name: 'max', initials: 'M' }, // just "M"
   { name: 'mia', initials: 'M' }, // just "M" too

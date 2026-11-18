@@ -54,19 +54,35 @@ export class ServerError extends Error {
  */
 export const REMEMBERED_IDS = 1000;
 
+/** How long a request waits for its answer before it is given up. */
+export const REQUEST_TIMEOUT_MS = 15_000;
+
+/**
+ * What a sync did. `refused`: the backend's list had none of this device's contacts, and
+ * there were several — nothing was dropped, because one wrong answer must not empty a
+ * list that only meeting again can rebuild (D21).
+ */
+export type SyncOutcome = 'synced' | 'refused';
+
 /** Events that answer one frame this client sent. */
 type Reply = Extract<ServerEvent, { type: 'sent' | 'invited' | 'accepted' | 'removed' | 'contacts' }>;
 
 /** Call `init()` from tc-crypto before using this. */
 export class TcClient {
   private socket?: WebSocket;
-  // The backend answers frames in order, so replies are matched first in, first out. An
-  // `error` answers whichever frame is first in line.
+  // Requests waiting for their answer. An answer goes to the oldest request expecting
+  // that kind of answer: the backend may answer two frames in either order (on AWS each
+  // frame is handled on its own), so the order sent is not relied on across kinds.
   private pending: Array<{
     expects: Reply['type'];
     resolve(reply: Reply): void;
     reject(error: Error): void;
   }> = [];
+  // Answers still owed to requests that were given up: ignored if they ever come.
+  private abandoned = new Map<Reply['type'], number>();
+  // Inviters whose invitation this device is accepting right now: the backend may list
+  // them before this device has added them.
+  private accepting = new Set<DeviceId>();
   private messageListeners: Array<(message: IncomingMessage) => void> = [];
   private inviteeListeners: Array<(invitee: Contact) => void> = [];
   private readonly contacts: ContactList;
@@ -232,19 +248,24 @@ export class TcClient {
     InitialsSchema.parse(initials);
     if (invitation.inviter === this.identity.deviceId) throw new Error('that is your own invitation');
     const key = invitationKey(invitation.secret, await proximity.sense(invitation));
-    const reply = await this.request(
-      {
-        action: 'accept',
-        tokenId: invitationTokenId(key),
-        inviter: invitation.inviter,
-        initials,
-        mac: invitationMac(key, invitation.inviter, this.identity.deviceId, initials),
-      },
-      'accepted',
-    );
-    // The key comes from the code we read, never from the backend.
-    if (reply.inviter !== invitation.inviter) throw new Error('the backend answered for someone else');
-    return this.addContact({ deviceId: invitation.inviter, initials: reply.initials });
+    this.accepting.add(invitation.inviter);
+    try {
+      const reply = await this.request(
+        {
+          action: 'accept',
+          tokenId: invitationTokenId(key),
+          inviter: invitation.inviter,
+          initials,
+          mac: invitationMac(key, invitation.inviter, this.identity.deviceId, initials),
+        },
+        'accepted',
+      );
+      // The key comes from the code we read, never from the backend.
+      if (reply.inviter !== invitation.inviter) throw new Error('the backend answered for someone else');
+      return await this.addContact({ deviceId: invitation.inviter, initials: reply.initials });
+    } finally {
+      this.accepting.delete(invitation.inviter);
+    }
   }
 
   /**
@@ -258,20 +279,36 @@ export class TcClient {
   }
 
   /**
-   * Drops every contact the backend no longer has — removed by the other side while this
-   * device was offline (D21). Never adds one: a key gets into the list only in person
-   * (D20). Call it after connecting; apps do when they are opened.
+   * Brings this device's list and the backend's in line (D21). Call it after connecting;
+   * apps do when they are opened.
+   *
+   * - Drops every contact the backend no longer has — removed by the other side while
+   *   this device was offline. Unless that would drop all of several contacts at once:
+   *   then nothing is dropped and the outcome is `refused`.
+   * - Never adds one: a key gets into the list only in person (D20). A contact the
+   *   backend has and this device does not — an acceptance this device never saw or
+   *   never believed — is ended on the backend, so that neither side has half a contact.
    */
-  async syncContacts(): Promise<void> {
+  async syncContacts(): Promise<SyncOutcome> {
     if (this.syncs++ === 0) this.addedDuringSync.clear();
     try {
       const reply = await this.request({ action: 'contacts' }, 'contacts');
       const known = new Set(reply.contacts);
-      for (const contact of await this.contacts.list()) {
-        if (!known.has(contact.deviceId) && !this.addedDuringSync.has(contact.deviceId)) {
-          await this.forget(contact.deviceId);
+      const mine = (await this.contacts.list()).filter((c) => !this.addedDuringSync.has(c.deviceId));
+      const gone = mine.filter((c) => !known.has(c.deviceId));
+      const refused = gone.length > 1 && gone.length === mine.length;
+      if (!refused) for (const contact of gone) await this.forget(contact.deviceId);
+
+      // Not while an invitation of ours is open, or being accepted by us: the backend may
+      // know of that contact a moment before this device does.
+      this.forgetExpiredInvitations();
+      if (this.openInvitations.size === 0) {
+        for (const deviceId of reply.contacts) {
+          if (this.accepting.has(deviceId) || (await this.contacts.get(deviceId))) continue;
+          await this.request({ action: 'remove', contact: deviceId }, 'removed');
         }
       }
+      return refused ? 'refused' : 'synced';
     } finally {
       this.syncs--;
     }
@@ -306,23 +343,69 @@ export class TcClient {
     });
   }
 
-  /** Sends a frame and waits for the reply of type `expects` (or an error). */
+  /**
+   * Sends a frame and waits for the reply of type `expects` (or an error). Rejects if no
+   * answer has come after REQUEST_TIMEOUT_MS.
+   */
   private request<T extends Reply['type']>(action: ClientAction, expects: T): Promise<Extract<Reply, { type: T }>> {
     return new Promise((resolve, reject) => {
       if (!this.socket || !this.connected) {
         reject(new Error('not connected'));
         return;
       }
-      this.pending.push({ expects, resolve: resolve as (reply: Reply) => void, reject });
+      const waiting = {
+        expects,
+        resolve: (reply: Reply) => {
+          clearTimeout(timer);
+          resolve(reply as Extract<Reply, { type: T }>);
+        },
+        reject: (error: Error) => {
+          clearTimeout(timer);
+          reject(error);
+        },
+      };
+      const timer = setTimeout(() => {
+        const at = this.pending.indexOf(waiting);
+        if (at === -1) return;
+        this.pending.splice(at, 1);
+        this.abandoned.set(expects, (this.abandoned.get(expects) ?? 0) + 1);
+        reject(new Error('no answer from the server'));
+      }, REQUEST_TIMEOUT_MS);
+      this.pending.push(waiting);
       this.socket.send(JSON.stringify(action));
     });
   }
 
   private reply(event: Reply): void {
-    const waiting = this.pending.shift();
-    if (!waiting) return;
-    if (waiting.expects === event.type) waiting.resolve(event);
-    else waiting.reject(new Error(`expected ${waiting.expects}, got ${event.type}`));
+    const at = this.pending.findIndex((waiting) => waiting.expects === event.type);
+    if (at !== -1) {
+      this.pending.splice(at, 1)[0]!.resolve(event);
+      return;
+    }
+    // The late answer to a request that was given up.
+    const owed = this.abandoned.get(event.type) ?? 0;
+    if (owed > 0) {
+      this.abandoned.set(event.type, owed - 1);
+      return;
+    }
+    // Nobody asked for this: whoever is first in line was answered wrongly.
+    const first = this.pending.shift();
+    first?.reject(new Error(`expected ${first.expects}, got ${event.type}`));
+  }
+
+  /**
+   * An error answers the oldest request it can be about: `not_a_contact` a send,
+   * `invitation_invalid` an invite or an accept, anything else whichever is first.
+   */
+  private fail(code: ErrorCode): void {
+    const about: Partial<Record<ErrorCode, Array<Reply['type']>>> = {
+      not_a_contact: ['sent'],
+      invitation_invalid: ['invited', 'accepted'],
+    };
+    const kinds = about[code];
+    const at = kinds ? this.pending.findIndex((waiting) => kinds.includes(waiting.expects)) : -1;
+    const [waiting] = this.pending.splice(Math.max(at, 0), 1);
+    waiting?.reject(new ServerError(code));
   }
 
   private async addContact(met: { deviceId: DeviceId; initials: Initials }): Promise<Contact> {
@@ -425,7 +508,7 @@ export class TcClient {
         await this.handleInvitee(event);
         return;
       case 'error':
-        this.pending.shift()?.reject(new ServerError(event.code));
+        this.fail(event.code);
         return;
     }
   }

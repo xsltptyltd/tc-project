@@ -21,6 +21,8 @@
     "tc-client/src",
     "tc-client/test",
     "cli/src",
-    "cli/test"
+    "cli/test",
+    "mobile-app/src/stored-book.ts",
+    "mobile-app/test"
   ]
 }

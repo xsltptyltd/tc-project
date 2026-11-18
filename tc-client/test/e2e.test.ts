@@ -1,5 +1,5 @@
 // Two clients talking through the local server: the whole path, on one machine.
-import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import WebSocket, { WebSocketServer } from 'ws';
 import {
   encryptFor,
@@ -18,6 +18,7 @@ import {
   NotAContact,
   ProximityUnavailable,
   REMEMBERED_IDS,
+  REQUEST_TIMEOUT_MS,
   ServerError,
   TcClient,
   textInvitationCodec,
@@ -549,6 +550,48 @@ describe('removing a contact, end to end', () => {
     expect(bookOf(bob.identity).contacts.size).toBe(0);
   });
 
+  it('follows a removal of one contact among several, but not a list that lost them all', async () => {
+    const alice = await connect();
+    const bob = await connect();
+    const carol = await connect();
+    befriend(alice.identity, bob.identity);
+    befriend(alice.identity, carol.identity);
+
+    // Bob removed alice while she was not looking: one of two, followed.
+    await server.store.removeContact(alice.identity.deviceId, bob.identity.deviceId);
+    expect(await alice.client.syncContacts()).toBe('synced');
+    expect([...bookOf(alice.identity).contacts.keys()]).toEqual([carol.identity.deviceId]);
+
+    // The server has lost everything (a restart, another table): all of several, refused.
+    befriend(alice.identity, bob.identity);
+    server.store.contacts.clear();
+    expect(await alice.client.syncContacts()).toBe('refused');
+    expect(bookOf(alice.identity).contacts.size).toBe(2);
+  });
+
+  it('leaves nobody with half a contact when the inviter never saw the acceptance', async () => {
+    const alice = await connect();
+    const bob = await connect();
+    const dropped: string[] = [];
+    bob.client.onContactRemoved((id) => dropped.push(id));
+    const { invitation } = await alice.client.invite('AZ', together);
+    await alice.client.close(); // her connection drops while the code is showing
+    await bob.client.accept(invitation, 'BB', together);
+    await bob.client.send(alice.identity.deviceId, 'hello?'); // nobody will ever show this
+    expect(bookOf(alice.identity).contacts.size).toBe(0);
+    expect(await server.store.isContact(alice.identity.deviceId, bob.identity.deviceId)).toBe(true);
+
+    // Alice's device, back, finds a contact it never checked, and ends it for both.
+    const later = clientFor(alice.identity);
+    clients.push(later);
+    await later.connect();
+    expect(await later.syncContacts()).toBe('synced');
+    expect(await server.store.isContact(alice.identity.deviceId, bob.identity.deviceId)).toBe(false);
+    expect(server.store.messages.size).toBe(0);
+    await expect.poll(() => bookOf(bob.identity).contacts.size).toBe(0);
+    expect(dropped).toEqual([alice.identity.deviceId]);
+  });
+
   it('deletes what was waiting between them, so it never arrives', async () => {
     const { alice, bob } = await aliceAndBob();
     await bob.client.close();
@@ -837,6 +880,82 @@ describe('client', () => {
       }
     });
 
+    it('gives each answer to the request it is for, when two answers cross', async () => {
+      // On AWS each frame is handled on its own: the second may be answered first.
+      let held: (() => void) | undefined;
+      const fake = await fakeServer((frame, socket) => {
+        const action = JSON.parse(frame);
+        if (action.action === 'send') held = () => socket.send(JSON.stringify({ type: 'sent', messageId: 'm1' }));
+        if (action.action === 'contacts') {
+          socket.send(JSON.stringify({ type: 'contacts', contacts: [alice.deviceId] }));
+          held?.();
+        }
+      });
+      try {
+        const client = clientFor(bob, fake.url);
+        await client.connect();
+        const sent = client.send(alice.deviceId, 'hi');
+        await expect.poll(() => held).toBeDefined();
+        const synced = client.syncContacts();
+        expect(await synced).toBe('synced');
+        expect(await sent).toEqual({ messageId: 'm1' });
+        await client.close();
+      } finally {
+        await fake.close();
+      }
+    });
+
+    it('gives a refusal to the request it is about, not to the one in front', async () => {
+      const fake = await fakeServer((frame, socket) => {
+        const action = JSON.parse(frame);
+        if (action.action === 'send') socket.send(JSON.stringify({ type: 'error', code: 'not_a_contact' }));
+        if (action.action === 'contacts') {
+          setTimeout(() => socket.send(JSON.stringify({ type: 'contacts', contacts: [alice.deviceId] })), 50);
+        }
+      });
+      try {
+        const client = clientFor(bob, fake.url);
+        await client.connect();
+        const synced = client.syncContacts(); // asked first, answered last
+        const sent = client.send(alice.deviceId, 'hi');
+        await expect(sent).rejects.toEqual(new ServerError('not_a_contact'));
+        expect(await synced).toBe('synced');
+        await client.close();
+      } finally {
+        await fake.close();
+      }
+    });
+
+    it('gives up a request that is never answered, and ignores its answer if it comes late', async () => {
+      let late: (() => void) | undefined;
+      const fake = await fakeServer((frame, socket) => {
+        const action = JSON.parse(frame);
+        if (action.action !== 'remove') return;
+        if (!late) late = () => socket.send(JSON.stringify({ type: 'removed', contact: action.contact }));
+        else socket.send(JSON.stringify({ type: 'removed', contact: action.contact }));
+      });
+      try {
+        const client = clientFor(bob, fake.url);
+        await client.connect();
+        vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+        const first = client.removeContact(alice.deviceId);
+        await expect.poll(() => late).toBeDefined();
+        vi.advanceTimersByTime(REQUEST_TIMEOUT_MS);
+        await expect(first).rejects.toThrow('no answer from the server');
+        vi.useRealTimers();
+        expect(bookOf(bob).contacts.size).toBe(1); // not answered, so not forgotten
+
+        late!(); // the old answer arrives, then a new request is made and answered
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        await client.removeContact(alice.deviceId);
+        expect(bookOf(bob).contacts.size).toBe(0);
+        await client.close();
+      } finally {
+        vi.useRealTimers();
+        await fake.close();
+      }
+    });
+
     it('rejects a request answered with the wrong kind of reply', async () => {
       const fake = await fakeServer((frame, socket) => {
         if (JSON.parse(frame).action === 'invite') socket.send(JSON.stringify({ type: 'sent', messageId: 'm1' }));
@@ -895,6 +1014,7 @@ describe('client', () => {
           socket.send(JSON.stringify({ type: 'contact_removed', contact: carol.deviceId })); // not ours
           socket.send(JSON.stringify({ type: 'contacts', contacts: [alice.deviceId, carol.deviceId] }));
         }
+        if (action.action === 'remove') socket.send(JSON.stringify({ type: 'removed', contact: action.contact }));
       });
       try {
         const client = clientFor(bob, fake.url);
@@ -904,6 +1024,8 @@ describe('client', () => {
         await client.syncContacts();
         expect([...bookOf(bob).contacts.keys()]).toEqual([alice.deviceId]); // carol not added
         expect(dropped).toEqual([]);
+        // …and the backend is asked to end the contact this device never made.
+        expect(fake.frames.map((f) => JSON.parse(f))).toContainEqual({ action: 'remove', contact: carol.deviceId });
         await client.close();
       } finally {
         await fake.close();
@@ -931,6 +1053,29 @@ describe('client', () => {
         secret = (await client.invite('CC', together)).invitation.secret;
         await client.syncContacts();
         expect([...bookOf(carol).contacts.keys()]).toEqual([bob.deviceId]);
+        await client.close();
+      } finally {
+        await fake.close();
+      }
+    });
+
+    it('does not end a contact the backend lists while an invitation of its own is open', async () => {
+      // It may be the acceptance of that very invitation, known to the backend first.
+      const fake = await fakeServer((frame, socket) => {
+        const action = JSON.parse(frame);
+        if (action.action === 'invite') {
+          socket.send(JSON.stringify({ type: 'invited', tokenId: action.tokenId, expiresIn: 20 }));
+        }
+        if (action.action === 'contacts') {
+          socket.send(JSON.stringify({ type: 'contacts', contacts: [alice.deviceId, carol.deviceId] }));
+        }
+      });
+      try {
+        const client = clientFor(bob, fake.url);
+        await client.connect();
+        await client.invite('BB', together);
+        await client.syncContacts();
+        expect(fake.frames.map((f) => JSON.parse(f).action)).not.toContain('remove');
         await client.close();
       } finally {
         await fake.close();

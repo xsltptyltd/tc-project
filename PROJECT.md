@@ -48,7 +48,7 @@ deployed. See `design/ROADMAP.md`.
 | `tc-client/` | one device's connection to the backend (connect, send, receive), shared by the CLI and the app |
 | `cli/` | command-line client for local development |
 | `infra/` | Terraform, one stack per directory: `dynamodb/`, `api-gateway/` (optional missed-messages REST), `s3/` (media) |
-| `mobile-app/` | the React Native (Expo) app — Android first, iOS later (`DECISIONS.md` D12). One basic screen so far |
+| `mobile-app/` | the React Native (Expo) app — Android first, iOS later (`DECISIONS.md` D12). Basic screens: contacts, add someone with a code, chat, settings |
 | `design/` | `ROADMAP.md` (where this is going), `DECISIONS.md` (what was decided and why), `README-environments.md` |
 
 Each folder has a `README.md`.

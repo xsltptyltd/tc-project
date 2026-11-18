@@ -116,7 +116,8 @@ export const ClientActionSchema = z.discriminatedUnion('action', [
   /**
    * "`contact` and I are no longer contacts." For both of us, at once: the backend deletes
    * the two records and every message still waiting between us, answers `removed`, and
-   * tells both our devices (`contact_removed`). The same answer whether or not we were
+   * tells both our devices (`contact_removed`). If we were not contacts it does nothing and
+   * tells nobody. The same answer whether or not we were
    * contacts (D5).
    */
   z.object({ action: z.literal('remove'), contact: DeviceIdSchema }),
