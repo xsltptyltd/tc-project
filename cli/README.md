@@ -85,9 +85,9 @@ removed JPS: you are no longer contacts,
 on either side, and whatever was waiting between you is deleted
 ```
 
-For both of you (`design/DECISIONS.md` D21): grace disappears from jean's list too — at
-once if jean is connected, otherwise the next time jean connects. `cli contacts` connects
-first to catch up, so `npm run cli -- contacts jean` shows it right away. Jean is not told.
+For both of you (`design/DECISIONS.md` D21): grace disappears from john's list too — at
+once if john is connected, otherwise the next time john connects. `cli contacts` connects
+first to catch up, so `npm run cli -- contacts john` shows it right away. John is not told.
 Neither can write to the other any more; to be contacts again, they meet again — and
 start afresh: new label, no alias.
 
@@ -128,7 +128,7 @@ npm run simulation          # terminal 2
 ```
 
 Twenty people — alice, adam, amelia, bob, betty, ben, charlie, chloe, david, emma, frank,
-grace, jane, john, jack, jean, lucy, max, mia, olivia — get a profile and initials chosen
+grace, jane, jon, jack, john, lucy, max, mia, olivia — get a profile and initials chosen
 to collide (three `AB`, three `BB`, three `JS`, two `CD`, two `M`). They then meet at
 random, about sixty times, through the real exchange: an invitation shown in a room, its
 code accepted from the same room. Some codes are ignored, some are tried from another room
